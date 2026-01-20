@@ -5,8 +5,20 @@ import torch.distributed as dist
 from typing import List
 
 
+# Check if CuPy NCCL support is available
+try:
+    import cupy.cuda.nccl
+    NCCL_AVAILABLE = True
+except (ImportError, AttributeError):
+    NCCL_AVAILABLE = False
+    print("WARNING: CuPy NCCL module not available. Will use PyTorch NCCL backend as fallback.")
+
+
 def _type_torch_to_cupy(torch_type: torch.dtype):
     # print(torch_type)
+    if not NCCL_AVAILABLE:
+        raise RuntimeError("CuPy NCCL module not available")
+    
     mappings = {
         torch.uint8: cupy.cuda.nccl.NCCL_UINT8,
         torch.int32: cupy.cuda.nccl.NCCL_INT32,
@@ -26,24 +38,35 @@ class NCCLCommunicator:
                  comm_group_size: int,
                  comm_name: str):
         self.comm_rank = comm_rank
+        self.cuda_id = cuda_id
         cupy.cuda.Device(cuda_id).use()
         self.comm_group_size = comm_group_size
+        self.use_nccl = NCCL_AVAILABLE
+        
         print("Initialize NCCLCommunicator: <", comm_name, ">; rank:", comm_rank)
+        if not self.use_nccl:
+            print("  (Using PyTorch distributed backend instead of CuPy NCCL)")
+        
         self.dist_store = dist.distributed_c10d._get_default_store()
 
-        if self.comm_rank == 0:
-            cuda_id = cupy.cuda.nccl.get_unique_id()
-            # print(cuda_id)
-            cuda_id_str = np.array(cuda_id).tobytes()
-            self.dist_store.set('group-'+comm_name+'-unique-id', cuda_id_str)
-            # print("Master put <group-"+comm_name+"-unique-id: ", cuda_id_str, ">.")
-        else:
-            cuda_id_str = self.dist_store.get('group-'+comm_name+'-unique-id')
+        if self.use_nccl:
+            # Use CuPy NCCL
+            if self.comm_rank == 0:
+                cuda_id_nccl = cupy.cuda.nccl.get_unique_id()
+                # print(cuda_id_nccl)
+                cuda_id_str = np.array(cuda_id_nccl).tobytes()
+                self.dist_store.set('group-'+comm_name+'-unique-id', cuda_id_str)
+                # print("Master put <group-"+comm_name+"-unique-id: ", cuda_id_str, ">.")
+            else:
+                cuda_id_str = self.dist_store.get('group-'+comm_name+'-unique-id')
 
-        comm_id = tuple(np.frombuffer(cuda_id_str, dtype=int))
-        # comm_id = cupy.cuda.nccl.get_unique_id()
-        # print(comm_id)
-        self.comm = cupy.cuda.nccl.NcclCommunicator(comm_group_size, comm_id, comm_rank)
+            comm_id = tuple(np.frombuffer(cuda_id_str, dtype=int))
+            # comm_id = cupy.cuda.nccl.get_unique_id()
+            # print(comm_id)
+            self.comm = cupy.cuda.nccl.NcclCommunicator(comm_group_size, comm_id, comm_rank)
+        else:
+            # Use PyTorch distributed backend as fallback
+            self.comm = None
 
     @staticmethod
     def barrier():
@@ -98,29 +121,43 @@ class NCCLCommunicator:
                tensor: torch.Tensor,
                dst: int,
                stream=cupy.cuda.Stream.null,
-               op=cupy.cuda.nccl.NCCL_SUM):
-        self.comm.reduce(
-            tensor.data_ptr(),  # force it to be in-place.
-            tensor.data_ptr(),
-            torch.numel(tensor),
-            _type_torch_to_cupy(tensor.dtype),
-            op,
-            dst,
-            stream.ptr
-        )
+               op=None):
+        if op is None:
+            op = cupy.cuda.nccl.NCCL_SUM if NCCL_AVAILABLE else None
+        
+        if not self.use_nccl:
+            # Use PyTorch distributed backend
+            dist.reduce(tensor, dst=dst)
+        else:
+            self.comm.reduce(
+                tensor.data_ptr(),  # force it to be in-place.
+                tensor.data_ptr(),
+                torch.numel(tensor),
+                _type_torch_to_cupy(tensor.dtype),
+                op,
+                dst,
+                stream.ptr
+            )
 
     def all_reduce(self,
                   tensor: torch.Tensor,
                   stream=cupy.cuda.Stream.null,
-                  op=cupy.cuda.nccl.NCCL_SUM):
-        self.comm.allReduce(
-            tensor.data_ptr(),
-            tensor.data_ptr(),
-            torch.numel(tensor),
-            _type_torch_to_cupy(tensor.dtype),
-            op,
-            stream.ptr
-        )
+                  op=None):
+        if op is None:
+            op = cupy.cuda.nccl.NCCL_SUM if NCCL_AVAILABLE else None
+        
+        if not self.use_nccl:
+            # Use PyTorch distributed backend
+            dist.all_reduce(tensor)
+        else:
+            self.comm.allReduce(
+                tensor.data_ptr(),
+                tensor.data_ptr(),
+                torch.numel(tensor),
+                _type_torch_to_cupy(tensor.dtype),
+                op,
+                stream.ptr
+            )
 
     def scatter(self,
                 tensor: torch.Tensor,
@@ -167,11 +204,13 @@ class NCCLCommunicator:
                    input_tensor_list: List[torch.Tensor],
                    stream=cupy.cuda.Stream.null):
         assert len(output_tensor_list) == self.comm_group_size and len(input_tensor_list) == self.comm_group_size
-        cupy.cuda.nccl.groupStart()
+        if self.use_nccl:
+            cupy.cuda.nccl.groupStart()
         for i in range(self.comm_group_size):
             self.send(input_tensor_list[i], i, stream)
             self.recv(output_tensor_list[i], i, stream)
-        cupy.cuda.nccl.groupEnd()
+        if self.use_nccl:
+            cupy.cuda.nccl.groupEnd()
 
     def all_gather(self,
                    tensor: torch.Tensor,
@@ -179,17 +218,24 @@ class NCCLCommunicator:
                    stream=cupy.cuda.Stream.null
                    ):
         assert len(output_tensor_list) == self.comm_group_size
-        cupy.cuda.nccl.groupStart()
+        if self.use_nccl:
+            cupy.cuda.nccl.groupStart()
         for i in range(self.comm_group_size):
             self.send(tensor, i, stream)
             self.recv(output_tensor_list[i], i, stream)
-        cupy.cuda.nccl.groupEnd()
+        if self.use_nccl:
+            cupy.cuda.nccl.groupEnd()
 
     def all_reduce_opt(self,
                        tensor: torch.Tensor,
                        buffer: List[torch.Tensor],
                        stream=cupy.cuda.Stream.null):
-        # First do all-to-all
+        if not self.use_nccl:
+            # Fallback to simple all_reduce
+            self.all_reduce(tensor, stream)
+            return
+        
+        # First do all-to-all (NCCL version)
         assert torch.numel(tensor.data) % self.comm_group_size == 0
         chunk_size = torch.numel(tensor.data) // self.comm_group_size
         t_type = _type_torch_to_cupy(tensor.dtype)

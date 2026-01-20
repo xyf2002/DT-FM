@@ -80,3 +80,26 @@ class GPTStageLast(GPTStageBase):
             assert target is not None
             x = self.model(x)
             return self.task_layer(x, target)
+
+
+class GPTStageSingle(GPTStageBase):
+    """Single GPU stage that includes embedding, transformer layers, and task layer."""
+    def __init__(self, args, vocab_size, num_classes, device):
+        super(GPTStageSingle, self).__init__(args, vocab_size, num_classes)
+        self.device = device
+        module_list = [self._create_first_layer()]
+        for _ in range(self._num_layers):
+            module_list.append(self._create_transformer_layer())
+        self.model = nn.Sequential(*module_list).to(device)
+        self.task_layer = self._create_last_layer().to(device)
+
+    def forward(self, x, target=None):
+        x = self.model(x.to(self.device)) if self._to_cpu else self.model(x)
+        if self.task == 'SeqClassification':
+            out = self.task_layer(x)
+            return out.cpu() if self._to_cpu else out
+        elif self.task == 'Seq2SeqClassification':
+            assert target is not None
+            return self.task_layer(x, target)
+        else:
+            return x.cpu() if self._to_cpu else x
