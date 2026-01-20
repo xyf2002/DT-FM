@@ -1,0 +1,48 @@
+# Virtual environments
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# Data and logs
+logs/
+*.log
+*.json
+*.pkl
+*.pickle
+
+# Build and distribution
+build/
+dist/
+*.tar.gz
+
+# Environment variables
+.env
+.env.local
+
+# OS specific
+Thumbs.db
+.DS_Store
