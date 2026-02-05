@@ -1,0 +1,51 @@
+id	qid1	qid2	question1	question2	is_duplicate
+0	1	2	What is the best way to learn Python?	How can I learn Python effectively?	1
+1	3	4	What is Python?	How to install Python?	0
+2	5	6	How do I make a pizza?	What's the best way to make pizza?	1
+3	7	8	Where is Paris?	What is Paris?	1
+4	9	10	How to cook pasta?	Best pasta recipes?	1
+5	11	12	What is machine learning?	How to learn ML?	1
+6	13	14	Where is London?	Who is the president?	0
+7	15	16	How to ride a bike?	How to ride a bicycle?	1
+8	17	18	What is deep learning?	What is artificial intelligence?	0
+9	19	20	How to bake a cake?	Best cake recipes?	1
+10	21	22	Question 0?	Question 0 variant?	0
+11	23	24	Question 1?	Question 1 variant?	1
+12	25	26	Question 2?	Question 2 variant?	0
+13	27	28	Question 3?	Question 3 variant?	1
+14	29	30	Question 4?	Question 4 variant?	0
+15	31	32	Question 5?	Question 5 variant?	1
+16	33	34	Question 6?	Question 6 variant?	0
+17	35	36	Question 7?	Question 7 variant?	1
+18	37	38	Question 8?	Question 8 variant?	0
+19	39	40	Question 9?	Question 9 variant?	1
+20	41	42	Question 10?	Question 10 variant?	0
+21	43	44	Question 11?	Question 11 variant?	1
+22	45	46	Question 12?	Question 12 variant?	0
+23	47	48	Question 13?	Question 13 variant?	1
+24	49	50	Question 14?	Question 14 variant?	0
+25	51	52	Question 15?	Question 15 variant?	1
+26	53	54	Question 16?	Question 16 variant?	0
+27	55	56	Question 17?	Question 17 variant?	1
+28	57	58	Question 18?	Question 18 variant?	0
+29	59	60	Question 19?	Question 19 variant?	1
+30	61	62	Question 20?	Question 20 variant?	0
+31	63	64	Question 21?	Question 21 variant?	1
+32	65	66	Question 22?	Question 22 variant?	0
+33	67	68	Question 23?	Question 23 variant?	1
+34	69	70	Question 24?	Question 24 variant?	0
+35	71	72	Question 25?	Question 25 variant?	1
+36	73	74	Question 26?	Question 26 variant?	0
+37	75	76	Question 27?	Question 27 variant?	1
+38	77	78	Question 28?	Question 28 variant?	0
+39	79	80	Question 29?	Question 29 variant?	1
+40	81	82	Question 30?	Question 30 variant?	0
+41	83	84	Question 31?	Question 31 variant?	1
+42	85	86	Question 32?	Question 32 variant?	0
+43	87	88	Question 33?	Question 33 variant?	1
+44	89	90	Question 34?	Question 34 variant?	0
+45	91	92	Question 35?	Question 35 variant?	1
+46	93	94	Question 36?	Question 36 variant?	0
+47	95	96	Question 37?	Question 37 variant?	1
+48	97	98	Question 38?	Question 38 variant?	0
+49	99	100	Question 39?	Question 39 variant?	1
