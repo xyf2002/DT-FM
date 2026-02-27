@@ -177,4 +177,81 @@ class AsteroidFaultTolerance:
 
     def redistribute_weights(self, failed_devices: List[int],
                              current_partition: List[int],
-                             surviving_models: Dict[int, nn
+                             surviving_models: Dict[int, nn.Module]):
+        """Redistribute weights after re-partitioning."""
+        logger.info(f"FT: Redistributing weights. "
+                    f"Failed: {failed_devices}, "
+                    f"Surviving: {list(surviving_models.keys())}")
+
+        all_weights: Dict[int, Dict[str, torch.Tensor]] = {}
+        for did, model in surviving_models.items():
+            all_weights[did] = {k: v.cpu().clone()
+                                for k, v in model.state_dict().items()}
+
+        for fd in failed_devices:
+            restored = self.restore_from_backup(fd)
+            if restored:
+                all_weights[fd] = restored
+                logger.info(f"FT: Restored stage {fd} weights from backup")
+            else:
+                logger.warning(f"FT: Could not restore stage {fd}, "
+                               f"will need retraining")
+
+        self._redistributed_weights = all_weights
+        return all_weights
+
+    # ── State sync & fault commit (from Confident) ────────────────
+
+    def restart_sync_state(self, device_idx: int, workers: Dict[int, str],
+                           partition: List[int]):
+        """Sync state after restart — maps to Confident's RestartSyncState RPC."""
+        self.state.set_partition_point(partition)
+        self.state.set_workers(workers)
+        logger.info(f"FT: State synced for device {device_idx}, "
+                    f"partition={partition}")
+
+    def commit_fault_sync(self, iter_id: int, partition: List[int]):
+        """Commit fault sync — maps to Confident's CommitFaultSync RPC."""
+        self.state.set_partition_point(partition)
+        with self.state._lock:
+            self.state._received_iter_ids = {
+                iid for iid in self.state._received_iter_ids if iid > iter_id
+            }
+        logger.info(f"FT: Fault sync committed at iter {iter_id}, "
+                    f"partition={partition}")
+
+    # ── Re-planning ───────────────────────────────────────────────
+
+    def lightweight_replan(self, current_plan: HPPPlanConfig,
+                           failed_device: int,
+                           planner: 'AsteroidPlanner') -> HPPPlanConfig:
+        """Layer-wise lightweight re-planning (Section 3.4)."""
+        new_groups = {}
+        for stage_idx, devices in current_plan.device_groups.items():
+            new_groups[stage_idx] = [d for d in devices if d != failed_device]
+
+        empty_stages = [s for s, devs in new_groups.items() if not devs]
+        if not empty_stages:
+            new_plan = copy.deepcopy(current_plan)
+            new_plan.device_groups = new_groups
+            return new_plan
+
+        logger.info(f"FT: Full re-plan needed, stage {empty_stages} "
+                    f"lost all devices")
+        return planner.plan()
+
+    # ── Checkpointing ─────────────────────────────────────────────
+
+    def save_checkpoint(self, epoch: int, iter_id: int,
+                        model: nn.Module, optimizer: optim.Optimizer):
+        path = self.checkpoint_dir / f"ckpt_e{epoch}_i{iter_id}_r{self.state.global_rank}.pt"
+        torch.save({
+            'epoch': epoch, 'iter_id': iter_id,
+            'stage_idx': self.state.stage_idx,
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict()
+        }, path)
+        return path
+
+    def load_checkpoint(self, path: str) -> Dict:
+        return torch.load(path, map_location='cpu', weights_only=False)
