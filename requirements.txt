@@ -1,0 +1,5 @@
+torch>=2.0.0
+cupy-cuda12x  # Change this based on your edge device CUDA version
+datasets
+transformers
+numpy
