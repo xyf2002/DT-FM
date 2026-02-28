@@ -1,5 +1,22 @@
 import os
+
+# =============================================================================
+# 1. HARDWARE ISOLATION (MUST BE AT THE VERY TOP)
+# Hides all GPUs except 5, 6, and 7. PyTorch will see them as cuda:0, cuda:1, cuda:2.
+# =============================================================================
+os.environ["CUDA_VISIBLE_DEVICES"] = "5,6,7"
+
+# IMPORTANT: Do NOT set CUDA_LAUNCH_BLOCKING=1 with NCCL - it causes deadlocks
+os.environ["CUDA_LAUNCH_BLOCKING"] = "0"
+os.environ["NCCL_SOCKET_IFNAME"] = "lo"
+os.environ["NCCL_P2P_DISABLE"] = "1"
+os.environ["NCCL_IB_DISABLE"] = "1"
+os.environ["NCCL_SHM_DISABLE"] = "0"
+os.environ["NCCL_DEBUG"] = "WARN"
+os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+
 import time
+import random
 from datetime import timedelta
 from pathlib import Path
 from typing import Optional, Tuple
@@ -7,41 +24,30 @@ from typing import Optional, Tuple
 import torch
 import torch.multiprocessing as mp
 
-# Import from our new modular structure
+# Modular imports
 from asteroid.core.config import AsteroidConfig, HPPPlanConfig, DeviceSpec
 from asteroid.core.state import AsteroidStateManager
 from asteroid.utils.logger import EVENT_LOGGER, logger
 from asteroid.model.stage import AsteroidStage
 from asteroid.optim.optim_utils import flatten_params, get_lr
-from asteroid.comm.nccl_utils import setup_nccl_communicators, _nccl_send, _nccl_recv, _nccl_allreduce
+# Note: Using torch.distributed for pipeline communication instead of raw NCCL
 from asteroid.ft.fault_tolerance import AsteroidFaultTolerance
 from asteroid.utils.data_utils import prepare_sst2
 from asteroid.planner.profiler import AsteroidProfiler
 from asteroid.planner.dp_planner import AsteroidPlanner
 
-os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
-os.environ["NCCL_SOCKET_IFNAME"] = "lo"
-os.environ["NCCL_P2P_DISABLE"] = "1"
-os.environ["NCCL_IB_DISABLE"] = "1"
-os.environ["NCCL_SHM_DISABLE"] = "0"
-os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-
 def worker(rank: int, cfg: AsteroidConfig,
            train_data: Tuple[torch.Tensor, torch.Tensor],
            val_data: Tuple[torch.Tensor, torch.Tensor],
            plan: Optional[HPPPlanConfig] = None):
-    """Baseline Asteroid Worker — modularized from astroid.py"""
     
     cuda_id = rank % torch.cuda.device_count()
     device = torch.device(f'cuda:{cuda_id}')
     torch.cuda.set_device(device)
     torch.manual_seed(cfg.seed + rank)
 
-    # 1. Parse Topology from the HPP Plan
     if plan is not None and plan.device_groups:
-        _rank_to_stage = {}
-        _rank_to_dp_pos = {}
-        _stage_sizes = {}
+        _rank_to_stage, _rank_to_dp_pos, _stage_sizes = {}, {}, {}
         for _s, _devs in plan.device_groups.items():
             _stage_sizes[_s] = len(_devs)
             for _dp, _dev in enumerate(_devs):
@@ -58,10 +64,11 @@ def worker(rank: int, cfg: AsteroidConfig,
         dp_size = cfg.world_size // pp_size
         pp_rank = rank % pp_size
         dp_rank = rank // pp_size
-        _stage_sizes = {s: dp_size for s in range(pp_size)}
 
-    is_first = (pp_rank == 0)
-    is_last = (pp_rank == pp_size - 1)
+    # Stage Booleans (Strict isolation for 1-stage vs Multi-stage)
+    is_single = (pp_size == 1)
+    is_first = (pp_rank == 0) and not is_single
+    is_last = (pp_rank == pp_size - 1) and not is_single
 
     state = AsteroidStateManager()
     state.global_rank = rank
@@ -73,16 +80,14 @@ def worker(rank: int, cfg: AsteroidConfig,
 
     if not torch.distributed.is_initialized():
         torch.distributed.init_process_group(
-            backend='gloo', init_method=cfg.dist_url,
+            backend='nccl', init_method=cfg.dist_url,
             world_size=cfg.world_size, rank=rank,
             timeout=timedelta(seconds=120))
 
-    # 2. Setup Process Groups & Communicators
     pp_process_group, pp_ranks_in_group = None, None
     dp_process_group, dp_ranks_in_group = None, None
 
     if plan is not None and plan.device_groups:
-        # Form PP columns (assumes symmetrical DP degrees for baseline functionality)
         max_dp = max(_stage_sizes.values())
         for d in range(max_dp):
             pp_ranks = []
@@ -96,7 +101,6 @@ def worker(rank: int, cfg: AsteroidConfig,
                     pp_process_group = grp
                     pp_ranks_in_group = pp_ranks
 
-        # Form DP rows
         for s in range(pp_size):
             dp_ranks = list(plan.device_groups[s])
             grp = torch.distributed.new_group(ranks=dp_ranks)
@@ -119,28 +123,26 @@ def worker(rank: int, cfg: AsteroidConfig,
                 dp_ranks_in_group = dp_ranks
 
     dist_store = torch.distributed.distributed_c10d._get_default_store()
-    pp_nccl, dp_nccl = setup_nccl_communicators(
-        rank, cfg, pp_rank, dp_rank, cuda_id, dist_store,
-        pp_size_override=pp_size, dp_size_override=dp_size)
+    # Skip NCCL communicators - use torch.distributed instead for pipeline comm
+    pp_nccl, dp_nccl = None, None
 
+    # CUDA Streams for Asynchronous Execution (Matched to DT-FM)
     comp_stream = torch.cuda.default_stream(device=device)
     recv_stream = torch.cuda.Stream(device=device, priority=-1)
     send_stream = torch.cuda.Stream(device=device, priority=-1)
     dp_stream = torch.cuda.Stream(device=device, priority=-1) if dp_size > 1 else None
 
-    # 3. Model Initialization based on Planner Partitions
     if plan is not None and plan.partition_points:
         boundaries = [0] + list(plan.partition_points) + [cfg.num_layers]
-        start_layer = boundaries[pp_rank]
-        end_layer = boundaries[pp_rank + 1]
+        start_layer, end_layer = boundaries[pp_rank], boundaries[pp_rank + 1]
     else:
         layers_per_stage = cfg.num_layers // pp_size
-        start_layer = pp_rank * layers_per_stage
-        end_layer = start_layer + layers_per_stage if pp_rank < pp_size - 1 else cfg.num_layers
+        start_layer, end_layer = pp_rank * layers_per_stage, (pp_rank + 1) * layers_per_stage
 
-    model = AsteroidStage(cfg, start_layer, end_layer, is_first=is_first, is_last=is_last).to(device)
+    # AsteroidStage inherently acts as First+Last if pp_rank==0 and pp_rank==pp_size-1
+    model = AsteroidStage(cfg, start_layer, end_layer, 
+                          is_first=(pp_rank == 0), is_last=(pp_rank == pp_size - 1)).to(device)
 
-    # Broadcast initial weights across DP group
     if dp_size > 1:
         for param in model.parameters():
             p_cpu = param.data.cpu()
@@ -162,7 +164,6 @@ def worker(rank: int, cfg: AsteroidConfig,
     train_embeds, train_labels = train_data
     val_embeds, val_labels = val_data
 
-    # 4. Standard Homogenous Micro-Batching Setup
     def sample_batch_for(embeds, labels, bs, iter_num, micro_idx):
         seed = cfg.seed * 1000003 + dp_rank * 100003 + iter_num * 997 + micro_idx
         g = torch.Generator()
@@ -173,32 +174,36 @@ def worker(rank: int, cfg: AsteroidConfig,
     num_micro = cfg.num_microbatches
     act_shape = (cfg.micro_batch_size, cfg.max_seq_len, cfg.embedding_dim)
 
-    # Establish Point-to-Point links strictly along the PP column
-    if pp_ranks_in_group:
-        my_idx = pp_ranks_in_group.index(rank)
-        pp_prev = pp_ranks_in_group[my_idx - 1] if my_idx > 0 else None
-        pp_next = pp_ranks_in_group[my_idx + 1] if my_idx < len(pp_ranks_in_group) - 1 else None
-    else:
-        pp_prev = pp_rank - 1 if pp_rank > 0 else None
-        pp_next = pp_rank + 1 if pp_rank < pp_size - 1 else None
+    pp_prev = pp_rank - 1 if pp_rank > 0 else None
+    pp_next = pp_rank + 1 if pp_rank < pp_size - 1 else None
 
-    input_bufs = [torch.zeros(act_shape, requires_grad=True, device=device) for _ in range(num_micro)] if not is_first else None
-    grad_bufs = [torch.zeros(act_shape, device=device) for _ in range(num_micro)] if not is_last else None
+    # Map pp_rank to global rank for send/recv
+    # pp_ranks_in_group[pp_rank] gives the global rank
+    def get_global_rank(pp_r):
+        if pp_ranks_in_group is not None:
+            return pp_ranks_in_group[pp_r]
+        return pp_r
 
-    fwd_recv_ready = [torch.cuda.Event() for _ in range(num_micro)]
-    fwd_comp_ready = [torch.cuda.Event() for _ in range(num_micro)]
-    bwd_recv_ready = [torch.cuda.Event() for _ in range(num_micro)]
-    bwd_comp_ready = [torch.cuda.Event() for _ in range(num_micro)]
+    pp_prev_global = get_global_rank(pp_prev) if pp_prev is not None else None
+    pp_next_global = get_global_rank(pp_next) if pp_next is not None else None
 
-    P = pp_size
-    warmup_microbatches = min(num_micro, P - pp_rank - 1) if pp_rank < P - 1 else 0
-    steady_microbatches = num_micro - warmup_microbatches
+    # Exact buffer setup from DT-FM
+    # Note: input_bufs need requires_grad=True but will be recreated each microbatch
+    input_bufs = [torch.zeros(act_shape, device=device) for _ in range(num_micro)] if not is_first and not is_single else None
+    grad_bufs = [torch.zeros(act_shape, device=device) for _ in range(num_micro)] if not is_last and not is_single else None
+
+    # Events for stream synchronization
+    fwd_recv_ready_events = [torch.cuda.Event() for _ in range(num_micro)]
+    fwd_comp_ready_events = [torch.cuda.Event() for _ in range(num_micro)]
+    bwd_recv_ready_events = [torch.cuda.Event() for _ in range(num_micro)]
+    bwd_comp_ready_events = [torch.cuda.Event() for _ in range(num_micro)]
 
     EVENT_LOGGER.set_epoch_start(time.time())
     best_val_loss = float('inf')
     t0 = time.time()
 
-    # 5. The 1F1B Loop
+    print(f"[RANK {rank}] Ready. Starting GPIPE Loop...", flush=True)
+
     for iter_num in range(cfg.max_iters):
         model.train()
         optimizer.zero_grad()
@@ -209,185 +214,97 @@ def worker(rank: int, cfg: AsteroidConfig,
 
         if input_bufs:
             for buf in input_bufs:
-                if buf.grad is not None:
-                    buf.grad.zero_()
+                if buf.grad is not None: buf.grad.zero_()
 
         micro_losses = []
         cached_outputs = [None] * num_micro
         loss_scale = 1.0 / num_micro
 
-        # Phase 1: Warmup FWD
-        for m in range(warmup_microbatches):
-            if is_first:
+        # =====================================================================
+        # EXACT GPIPE LOOP (Adapted strictly from dtfm_gpt2_train copy.py)
+        # ALL Forwards -> Barrier -> ALL Backwards -> Sync
+        # =====================================================================
+
+        # ── GPipe FORWARD ──────────────────────────────────────────
+        # Use torch.distributed.send/recv for reliable pipeline communication
+        for m in range(num_micro):
+            if is_single:
                 x, y = sample_batch_for(train_embeds, train_labels, cfg.micro_batch_size, iter_num, m)
-                with torch.cuda.stream(comp_stream):
-                    out = model(x)
-                    cached_outputs[m] = out
-                    comp_stream.record_event(fwd_comp_ready[m])
-                torch.cuda.synchronize()
-                if pp_next is not None:
-                    with torch.cuda.stream(send_stream):
-                        send_stream.wait_event(fwd_comp_ready[m])
-                        _nccl_send(out.detach().contiguous(), pp_next, pp_nccl, send_stream)
-                    torch.cuda.synchronize()
-            else:
-                with torch.cuda.stream(recv_stream):
-                    _nccl_recv(input_bufs[m], pp_prev, pp_nccl, recv_stream)
-                    recv_stream.record_event(fwd_recv_ready[m])
-                torch.cuda.synchronize()
-                with torch.cuda.stream(comp_stream):
-                    comp_stream.wait_event(fwd_recv_ready[m])
-                    inp = input_bufs[m]
-                    if not inp.requires_grad:
-                        inp = inp.requires_grad_(True)
-                        input_bufs[m] = inp
-                    if is_last:
-                        _, y = sample_batch_for(train_embeds, train_labels, cfg.micro_batch_size, iter_num, m)
-                        loss = model(inp, y) * loss_scale
-                        micro_losses.append(loss.item() / loss_scale)
-                        cached_outputs[m] = loss
+                loss = model(x, y) * loss_scale
+                micro_losses.append(loss)
+                cached_outputs[m] = loss
+
+            elif is_first:
+                x, y = sample_batch_for(train_embeds, train_labels, cfg.micro_batch_size, iter_num, m)
+                out = model(x)
+                cached_outputs[m] = out
+                if pp_next_global is not None:
+                    torch.distributed.send(out.data.contiguous(), dst=pp_next_global)
+
+            elif is_last:
+                torch.distributed.recv(input_bufs[m], src=pp_prev_global)
+                input_bufs[m].requires_grad_(True)  # Enable grad tracking after recv
+                _, y = sample_batch_for(train_embeds, train_labels, cfg.micro_batch_size, iter_num, m)
+                loss = model(input_bufs[m], y) * loss_scale
+                micro_losses.append(loss)
+                cached_outputs[m] = loss
+
+            else:  # Middle stage
+                torch.distributed.recv(input_bufs[m], src=pp_prev_global)
+                input_bufs[m].requires_grad_(True)  # Enable grad tracking after recv
+                out = model(input_bufs[m])
+                cached_outputs[m] = out
+                if pp_next_global is not None:
+                    torch.distributed.send(out.data.contiguous(), dst=pp_next_global)
+
+        # Barrier ensures all forwards are queued safely
+        torch.distributed.barrier()
+
+        # ── GPipe BACKWARD ─────────────────────────────────────────
+        # Use torch.distributed.send/recv for reliable pipeline communication
+        for m in reversed(range(num_micro)):
+            if is_single:
+                cached_outputs[m].backward()
+
+            elif is_last:
+                out = cached_outputs[m]
+                if out is not None:
+                    if out.dim() == 0:
+                        out.backward()
                     else:
-                        out = model(inp)
-                        cached_outputs[m] = out
-                    comp_stream.record_event(fwd_comp_ready[m])
-                torch.cuda.synchronize()
-                if pp_next is not None:
-                    with torch.cuda.stream(send_stream):
-                        send_stream.wait_event(fwd_comp_ready[m])
-                        _nccl_send(cached_outputs[m].detach().contiguous(), pp_next, pp_nccl, send_stream)
-                    torch.cuda.synchronize()
+                        out.backward(torch.ones_like(out))
+                if pp_prev_global is not None:
+                    torch.distributed.send(input_bufs[m].grad.contiguous(), dst=pp_prev_global)
 
-        # Phase 2: Steady-state 1F1B
-        for m_idx in range(steady_microbatches):
-            fwd_m = warmup_microbatches + m_idx
-            bwd_m = m_idx
+            elif is_first:
+                if pp_next_global is not None:
+                    torch.distributed.recv(grad_bufs[m], src=pp_next_global)
+                    cached_outputs[m].backward(gradient=grad_bufs[m])
 
-            if is_first:
-                x, y = sample_batch_for(train_embeds, train_labels, cfg.micro_batch_size, iter_num, fwd_m)
-                with torch.cuda.stream(comp_stream):
-                    out = model(x)
-                    cached_outputs[fwd_m] = out
-                    comp_stream.record_event(fwd_comp_ready[fwd_m])
-                torch.cuda.synchronize()
-                if pp_next is not None:
-                    with torch.cuda.stream(send_stream):
-                        send_stream.wait_event(fwd_comp_ready[fwd_m])
-                        _nccl_send(out.detach().contiguous(), pp_next, pp_nccl, send_stream)
-                    torch.cuda.synchronize()
-            else:
-                with torch.cuda.stream(recv_stream):
-                    _nccl_recv(input_bufs[fwd_m], pp_prev, pp_nccl, recv_stream)
-                    recv_stream.record_event(fwd_recv_ready[fwd_m])
-                torch.cuda.synchronize()
-                with torch.cuda.stream(comp_stream):
-                    comp_stream.wait_event(fwd_recv_ready[fwd_m])
-                    inp = input_bufs[fwd_m]
-                    if not inp.requires_grad:
-                        inp = inp.requires_grad_(True)
-                        input_bufs[fwd_m] = inp
-                    if is_last:
-                        _, y = sample_batch_for(train_embeds, train_labels, cfg.micro_batch_size, iter_num, fwd_m)
-                        loss = model(inp, y) * loss_scale
-                        micro_losses.append(loss.item() / loss_scale)
-                        cached_outputs[fwd_m] = loss
-                    else:
-                        out = model(inp)
-                        cached_outputs[fwd_m] = out
-                    comp_stream.record_event(fwd_comp_ready[fwd_m])
-                torch.cuda.synchronize()
-                if pp_next is not None:
-                    with torch.cuda.stream(send_stream):
-                        send_stream.wait_event(fwd_comp_ready[fwd_m])
-                        _nccl_send(cached_outputs[fwd_m].detach().contiguous(), pp_next, pp_nccl, send_stream)
-                    torch.cuda.synchronize()
+            else:  # Middle stage
+                torch.distributed.recv(grad_bufs[m], src=pp_next_global)
+                cached_outputs[m].backward(gradient=grad_bufs[m])
+                if pp_prev_global is not None:
+                    torch.distributed.send(input_bufs[m].grad.contiguous(), dst=pp_prev_global)
 
-            if is_last:
-                with torch.cuda.stream(comp_stream):
-                    out = cached_outputs[bwd_m]
-                    if out is not None:
-                        if out.dim() == 0:
-                            out.backward()
-                        else:
-                            out.backward(torch.ones_like(out))
-                        comp_stream.record_event(bwd_comp_ready[bwd_m])
-                torch.cuda.synchronize()
-                if pp_prev is not None and input_bufs and input_bufs[bwd_m].grad is not None:
-                    with torch.cuda.stream(send_stream):
-                        send_stream.wait_event(bwd_comp_ready[bwd_m])
-                        _nccl_send(input_bufs[bwd_m].grad.contiguous(), pp_prev, pp_nccl, send_stream)
-                    torch.cuda.synchronize()
-            else:
-                with torch.cuda.stream(recv_stream):
-                    _nccl_recv(grad_bufs[bwd_m], pp_next, pp_nccl, recv_stream)
-                    recv_stream.record_event(bwd_recv_ready[bwd_m])
-                torch.cuda.synchronize()
-                with torch.cuda.stream(comp_stream):
-                    comp_stream.wait_event(bwd_recv_ready[bwd_m])
-                    out = cached_outputs[bwd_m]
-                    if out is not None:
-                        out.backward(gradient=grad_bufs[bwd_m])
-                    comp_stream.record_event(bwd_comp_ready[bwd_m])
-                torch.cuda.synchronize()
-                if pp_prev is not None and input_bufs and input_bufs[bwd_m].grad is not None:
-                    with torch.cuda.stream(send_stream):
-                        send_stream.wait_event(bwd_comp_ready[bwd_m])
-                        _nccl_send(input_bufs[bwd_m].grad.contiguous(), pp_prev, pp_nccl, send_stream)
-                    torch.cuda.synchronize()
-            cached_outputs[bwd_m] = None
+        # Synchronize GPU ONCE at the end of the iteration before optimizer step
+        torch.cuda.synchronize()
 
-        # Phase 3: Cooldown BWD
-        for m in range(steady_microbatches, num_micro):
-            if is_last:
-                with torch.cuda.stream(comp_stream):
-                    out = cached_outputs[m]
-                    if out is not None:
-                        if out.dim() == 0:
-                            out.backward()
-                        else:
-                            out.backward(torch.ones_like(out))
-                        comp_stream.record_event(bwd_comp_ready[m])
-                torch.cuda.synchronize()
-                if pp_prev is not None and input_bufs and input_bufs[m].grad is not None:
-                    with torch.cuda.stream(send_stream):
-                        send_stream.wait_event(bwd_comp_ready[m])
-                        _nccl_send(input_bufs[m].grad.contiguous(), pp_prev, pp_nccl, send_stream)
-                    torch.cuda.synchronize()
-            else:
-                with torch.cuda.stream(recv_stream):
-                    _nccl_recv(grad_bufs[m], pp_next, pp_nccl, recv_stream)
-                    recv_stream.record_event(bwd_recv_ready[m])
-                torch.cuda.synchronize()
-                with torch.cuda.stream(comp_stream):
-                    comp_stream.wait_event(bwd_recv_ready[m])
-                    out = cached_outputs[m]
-                    if out is not None:
-                        out.backward(gradient=grad_bufs[m])
-                    comp_stream.record_event(bwd_comp_ready[m])
-                torch.cuda.synchronize()
-                if pp_prev is not None and input_bufs and input_bufs[m].grad is not None:
-                    with torch.cuda.stream(send_stream):
-                        send_stream.wait_event(bwd_comp_ready[m])
-                        _nccl_send(input_bufs[m].grad.contiguous(), pp_prev, pp_nccl, send_stream)
-                    torch.cuda.synchronize()
-            cached_outputs[m] = None
+        # Late loss scaling to avoid async stream blockage
+        if is_last or is_single:
+            avg_loss = sum([l.item() / loss_scale for l in micro_losses]) / len(micro_losses) if micro_losses else 0
 
-        # 6. DP Sync & Optimizer Step
-        if dp_size > 1 and flat_param is not None and dp_nccl is not None:
-            bwd_ready = torch.cuda.Event()
-            comp_stream.record_event(bwd_ready)
-            with torch.cuda.stream(dp_stream):
-                dp_stream.wait_event(bwd_ready)
-                _nccl_allreduce(flat_param.grad.data, dp_nccl, dp_stream)
-            torch.cuda.synchronize()
+        # DP gradient sync using torch.distributed.all_reduce
+        if dp_size > 1 and flat_param is not None and dp_process_group is not None:
+            torch.distributed.all_reduce(flat_param.grad.data, group=dp_process_group)
             flat_param.grad.data.div_(dp_size)
 
         if cfg.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+        
         optimizer.step()
-        torch.cuda.synchronize()
         torch.distributed.barrier()
 
-        # Fault Tolerance Checks
         if iter_num % cfg.ft_check_interval == 0 and iter_num > 0:
             state.record_backward(iter_num)
             if iter_num > cfg.ft_check_interval:
@@ -399,8 +316,7 @@ def worker(rank: int, cfg: AsteroidConfig,
         t1 = time.time()
         dt = t1 - t0
         t0 = t1
-        if is_last and iter_num % cfg.log_interval == 0:
-            avg_loss = sum(micro_losses) / len(micro_losses) if micro_losses else 0
+        if (is_last or is_single) and iter_num % cfg.log_interval == 0:
             tps = cfg.global_batch_size * cfg.max_seq_len / dt if dt > 0 else 0
             print(f"  iter {iter_num:>5d} | loss={avg_loss:.4f} | lr={lr:.2e} | {tps:,.0f} tok/s | dt={dt*1000:.1f}ms", flush=True)
 
@@ -410,24 +326,132 @@ def worker(rank: int, cfg: AsteroidConfig,
     torch.distributed.destroy_process_group()
 
 
+def _run_isolated_hardware_profiling(cfg, devices, queue):
+    import torch
+    import gc
+    from asteroid.planner.profiler import AsteroidProfiler
+    from asteroid.model.stage import _create_block
+    
+    profiler = AsteroidProfiler(cfg, devices)
+    
+    # Profile on first device only (assume homogeneous GPUs) - memory efficient
+    d = devices[0]
+    device = torch.device(f"cuda:{d.device_id}")
+    torch.cuda.set_device(device)
+    torch.cuda.empty_cache()
+    
+    # Profile one layer at a time to avoid OOM
+    batch_sizes = [4]
+    seq_len, d_model = cfg.max_seq_len, cfg.embedding_dim
+    num_iters = 10
+    
+    import numpy as np
+    for layer_idx in range(cfg.num_layers):
+        # Create single layer
+        layer = _create_block(cfg).to(device)
+        
+        for bs in batch_sizes:
+            x = torch.randn(bs, seq_len, d_model, device=device, requires_grad=True)
+            
+            # Warmup
+            for _ in range(2):
+                with torch.no_grad():
+                    _ = layer(x)
+            torch.cuda.synchronize()
+            
+            # Forward timing
+            fwd_times = []
+            for _ in range(num_iters):
+                torch.cuda.synchronize()
+                s = torch.cuda.Event(enable_timing=True)
+                e = torch.cuda.Event(enable_timing=True)
+                s.record()
+                with torch.no_grad():
+                    _ = layer(x)
+                e.record()
+                torch.cuda.synchronize()
+                fwd_times.append(s.elapsed_time(e))
+            
+            # Backward timing
+            bwd_times = []
+            for _ in range(num_iters):
+                torch.cuda.synchronize()
+                layer.zero_grad()
+                if x.grad is not None:
+                    x.grad.zero_()
+                out = layer(x)
+                grad_out = torch.ones_like(out)
+                s = torch.cuda.Event(enable_timing=True)
+                e = torch.cuda.Event(enable_timing=True)
+                s.record()
+                out.backward(gradient=grad_out)
+                e.record()
+                torch.cuda.synchronize()
+                bwd_times.append(s.elapsed_time(e))
+            
+            fwd_ms = float(np.median(fwd_times[2:]))
+            bwd_ms = float(np.median(bwd_times[2:]))
+            profiler.exec_times[d.device_id][layer_idx][bs] = (fwd_ms, bwd_ms)
+        
+        # Store sizes for this layer
+        if layer_idx == 0:
+            profiler.activation_sizes = [seq_len * d_model * 4] * cfg.num_layers
+            weight_size = sum(p.numel() * p.element_size() for p in layer.parameters())
+            profiler.weight_sizes = [weight_size] * cfg.num_layers
+        
+        # Cleanup immediately
+        del layer, x
+        torch.cuda.empty_cache()
+        gc.collect()
+    
+    # Copy profiled times to other devices (assume homogeneous)
+    for other_d in devices[1:]:
+        profiler.exec_times[other_d.device_id] = dict(profiler.exec_times[d.device_id])
+        
+    def sanitize_dict(d):
+        if isinstance(d, dict):
+            return {k: sanitize_dict(v) for k, v in d.items()}
+        return d
+        
+    queue.put({
+        'exec_times': sanitize_dict(profiler.exec_times),
+        'weight_sizes': profiler.weight_sizes,
+        'activation_sizes': profiler.activation_sizes
+    })
+
 if __name__ == "__main__":
+    from asteroid.model.stage import _create_block
+    import random
+    
+    port = random.randint(20000, 30000)
     cfg = AsteroidConfig(
-        embedding_dim=768, num_heads=12, num_layers=12, d_ff=3072,
-        max_seq_len=128, vocab_size=50257, num_classes=2,
-        global_batch_size=16, micro_batch_size=4, num_microbatches=4,
-        lr=3e-4, max_iters=50, warmup_iters=5, log_interval=5,
-        world_size=4, num_stages=2,
-        dist_url="tcp://127.0.0.1:29600"
+        world_size=3, 
+        num_stages=3,
+        dist_url=f"tcp://127.0.0.1:{port}"
     )
 
-    devices = [DeviceSpec(device_id=i, compute_capacity=1.0 + 0.5 * (i % 2)) for i in range(cfg.world_size)]
-    profiler = AsteroidProfiler(cfg, devices)
-    profiler.set_synthetic_profiles(cfg.num_layers, cfg.world_size, batch_sizes=[1, 2, 4, 8, 16])
+    devices = [DeviceSpec(device_id=i, memory_budget_mb=8192.0) for i in range(cfg.world_size)]
+
+    print(f"Phase 1: Running Actual Hardware Profiling (Mapping to Physical 4,5,6)...")
     
+    ctx = mp.get_context('spawn')
+    q = ctx.Queue()
+    p = ctx.Process(target=_run_isolated_hardware_profiling, args=(cfg, devices, q))
+    p.start()
+    profiler_data = q.get()
+    p.join()
+
+    profiler = AsteroidProfiler(cfg, devices)
+    profiler.exec_times = profiler_data['exec_times']
+    profiler.weight_sizes = profiler_data['weight_sizes']
+    profiler.activation_sizes = profiler_data['activation_sizes']
+
+    print("Phase 2: Planning Stage...")
     plan = AsteroidPlanner(profiler, cfg, devices).plan()
+    
+    print("Phase 3: Dataset Preparation...")
     train_data, val_data = prepare_sst2(cfg)
 
-    print("\nSpawning workers...")
-    mp.set_start_method('fork', force=True)
+    print(f"\nPhase 4: Spawning {cfg.world_size} workers on port {port}...")
+    
     mp.spawn(worker, args=(cfg, train_data, val_data, plan), nprocs=cfg.world_size, join=True)
-    print("\nAll workers finished.")

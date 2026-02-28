@@ -41,7 +41,7 @@ class AsteroidConfig:
     log_interval: int = 10
     seed: int = 42
     # Parallelism (HPP)
-    world_size: int = 4
+    world_size: int = 3
     num_stages: int = 2       # P in the paper
     # Communication
     dist_url: str = "tcp://127.0.0.1:29600"
@@ -56,7 +56,7 @@ class AsteroidConfig:
     # I/O
     output_dir: str = "./asteroid_output"
     dataset: str = "sst2"
-
+    gpu_ids: List[int] = field(default_factory=lambda: [0, 1, 2, 3])
     def __post_init__(self):
         self.num_microbatches = self.global_batch_size // self.micro_batch_size
         os.makedirs(self.output_dir, exist_ok=True)
