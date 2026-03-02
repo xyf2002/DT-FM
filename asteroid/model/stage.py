@@ -5,6 +5,7 @@ import torch.nn as nn
 from ..core.config import AsteroidConfig
 from .blocks import GPT2Block, EncoderBlock
 from .heads import ClassificationHead, LMHead
+from .llama import LlamaBlock
 
 # ── Model registry & factory (makes Asteroid LLM-agnostic) ──────────
 
@@ -12,6 +13,7 @@ from .heads import ClassificationHead, LMHead
 MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "gpt2": {"block": GPT2Block, "causal": True},
     "encoder": {"block": EncoderBlock, "causal": False},
+    "llama": {"block": LlamaBlock, "causal": True},
 }
 
 TASK_REGISTRY: Dict[str, type] = {
@@ -35,9 +37,15 @@ def _create_block(cfg: AsteroidConfig) -> nn.Module:
             f"Unknown model_type '{cfg.model_type}'. "
             f"Available: {list(MODEL_REGISTRY.keys())}. "
             f"Use register_model() to add custom architectures.")
+    kwargs: Dict[str, Any] = {
+        "use_flash": cfg.use_flash_attention,
+    }
+    if cfg.model_type == "llama":
+        # n_kv_heads: 0 means MHA (same as n_heads)
+        kv_heads = cfg.n_kv_heads if cfg.n_kv_heads > 0 else cfg.num_heads
+        kwargs["n_kv_heads"] = kv_heads
     return entry["block"](cfg.embedding_dim, cfg.num_heads, cfg.d_ff,
-                          cfg.max_seq_len, cfg.dropout,
-                          use_flash=cfg.use_flash_attention)
+                          cfg.max_seq_len, cfg.dropout, **kwargs)
 
 def _create_head(cfg: AsteroidConfig) -> nn.Module:
     """Factory: instantiate a task head from config."""
