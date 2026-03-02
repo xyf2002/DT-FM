@@ -1,0 +1,253 @@
+---
+# ============================================================================
+# Asteroid Full Cluster Deployment Playbook
+# ============================================================================
+# Orchestrates the complete deployment pipeline:
+#   Phase 0: Bootstrap nodes (if not done)
+#   Phase 1: Profile cluster hardware
+#   Phase 2: Generate HPP plan
+#   Phase 3: Build and distribute Docker image
+#   Phase 4: Generate K8s manifests
+#   Phase 5: Deploy to K8s
+#
+# Usage:
+#   # Full deployment
+#   ansible-playbook setup_cluster.yml -v
+#
+#   # Skip profiling (use existing profiles)
+#   ansible-playbook setup_cluster.yml -e "skip_profiling=true" -v
+#
+#   # Custom image tag
+#   ansible-playbook setup_cluster.yml -e "image_tag=v1.0.0" -v
+#
+# Prerequisites:
+#   - secrets.yml configured with SSH credentials
+#   - inventory.ini updated with cluster nodes
+#   - K3s cluster running
+
+- name: Asteroid Full Cluster Deployment
+  hosts: localhost
+  gather_facts: true
+  vars:
+    # Paths (relative to deploy directory)
+    deploy_dir: "{{ playbook_dir }}"
+    project_root: "{{ playbook_dir }}/.."
+    profiles_dir: "{{ project_root }}/profiles"
+    plan_output: "{{ project_root }}/hpp_plan.json"
+    manifests_dir: "{{ deploy_dir }}/generated"
+    
+    # Image configuration
+    image_name: asteroid
+    image_tag: "{{ lookup('env', 'IMAGE_TAG') | default('latest', true) }}"
+    image_full: "{{ image_name }}:{{ image_tag }}"
+    
+    # K8s configuration
+    namespace: default
+    master_port: 29500
+    
+    # Planner configuration
+    num_stages: 2
+    num_layers: 12
+    planner_python: "{{ project_root }}/.venv/bin/python"
+    ansible_playbook_bin: "{{ project_root }}/.venv/bin/ansible-playbook"
+    
+    # Flags
+    skip_bootstrap: false
+    skip_profiling: false
+    skip_build: false
+    apply_manifests: true
+
+  tasks:
+    # =========================================================================
+    # Phase 0: Bootstrap Nodes
+    # =========================================================================
+    - name: "BOOTSTRAP | Check if bootstrap needed"
+      stat:
+        path: /opt/asteroid/venv/bin/python
+      register: venv_check
+      delegate_to: "{{ groups['cluster'][0] }}"
+      when: not skip_bootstrap
+
+    - name: "BOOTSTRAP | Run bootstrap playbook"
+      command: ansible-playbook bootstrap_nodes.yaml -v
+      args:
+        chdir: "{{ deploy_dir }}"
+      when: 
+        - not skip_bootstrap
+        - not venv_check.stat.exists | default(true)
+
+    # =========================================================================
+    # Phase 1: Profile Cluster
+    # =========================================================================
+    - name: "PROFILE | Check for existing profiles"
+      find:
+        paths: "{{ profiles_dir }}"
+        patterns: "profile_*.json"
+      register: existing_profiles
+
+    - name: "PROFILE | Display existing profiles"
+      debug:
+        msg: "Found {{ existing_profiles.matched }} existing profile(s)"
+
+    - name: "PROFILE | Run profiling playbook"
+      command: ansible-playbook profile_and_gather.yaml -v
+      args:
+        chdir: "{{ deploy_dir }}"
+      when: 
+        - not skip_profiling
+        - existing_profiles.matched == 0
+
+    - name: "PROFILE | Verify profiles gathered"
+      find:
+        paths: "{{ profiles_dir }}"
+        patterns: "profile_*.json"
+      register: gathered_profiles
+
+    - name: "PROFILE | Assert profiles exist"
+      assert:
+        that: gathered_profiles.matched > 0
+        fail_msg: "No profiles found. Run profiling first or check for errors."
+        success_msg: "Found {{ gathered_profiles.matched }} profile(s)"
+
+    # =========================================================================
+    # Phase 2: Generate HPP Plan
+    # =========================================================================
+    - name: "PLAN | Run planner"
+      command: >
+        {{ planner_python }} run_planner.py
+        --profiles-dir {{ profiles_dir }}
+        --cluster-conf {{ project_root }}/cluster.conf
+        --output {{ plan_output }}
+        --num-stages {{ num_stages }}
+        --num-layers {{ num_layers }}
+      args:
+        chdir: "{{ project_root }}"
+      register: planner_output
+
+    - name: "PLAN | Display planner output"
+      debug:
+        var: planner_output.stdout_lines
+
+    - name: "PLAN | Load generated plan"
+      slurp:
+        src: "{{ plan_output }}"
+      register: plan_content
+
+    - name: "PLAN | Display plan summary"
+      debug:
+        msg: |
+          HPP Plan Generated:
+          - Stages: {{ (plan_content.content | b64decode | from_json).num_stages }}
+          - World Size: {{ (plan_content.content | b64decode | from_json).world_size }}
+          - Partition: {{ (plan_content.content | b64decode | from_json).partition_points }}
+
+    # =========================================================================
+    # Phase 3: Build and Distribute Docker Image
+    # =========================================================================
+    - name: "IMAGE | Build and distribute image"
+      command: "{{ ansible_playbook_bin }} -i inventory.ini distribute_image.yaml -v -e image_tag={{ image_tag }}"
+      args:
+        chdir: "{{ deploy_dir }}"
+      environment:
+        IMAGE_TAG: "{{ image_tag }}"
+      become: false
+      when: not skip_build
+
+    # =========================================================================
+    # Phase 4: Generate K8s Manifests
+    # =========================================================================
+    - name: "MANIFESTS | Generate K8s manifests"
+      command: >
+        {{ planner_python }} generate_manifests.py
+        --plan {{ plan_output }}
+        --image {{ image_full }}
+        --namespace {{ namespace }}
+        --master-port {{ master_port }}
+        --output-dir {{ manifests_dir }}
+      args:
+        chdir: "{{ deploy_dir }}"
+      register: manifest_output
+
+    - name: "MANIFESTS | Display generation output"
+      debug:
+        var: manifest_output.stdout_lines
+
+    - name: "MANIFESTS | List generated files"
+      find:
+        paths: "{{ manifests_dir }}"
+        patterns: "*.yaml"
+      register: generated_manifests
+
+    - name: "MANIFESTS | Display generated files"
+      debug:
+        msg: "Generated {{ generated_manifests.matched }} manifest files"
+
+    # =========================================================================
+    # Phase 5: Deploy to K8s
+    # =========================================================================
+    - name: "K8S | Create namespace"
+      command: kubectl create namespace {{ namespace }}
+      environment:
+        KUBECONFIG: "{{ ansible_env.HOME }}/.kube/config"
+      ignore_errors: true
+      when: apply_manifests
+
+    - name: "K8S | Apply manifests"
+      command: kubectl apply -f {{ manifests_dir }}/
+      environment:
+        KUBECONFIG: "{{ ansible_env.HOME }}/.kube/config"
+      register: kubectl_apply
+      when: apply_manifests
+
+    - name: "K8S | Display apply result"
+      debug:
+        var: kubectl_apply.stdout_lines
+      when: apply_manifests
+
+    - name: "K8S | Wait for pods to start"
+      command: >
+        kubectl wait --for=condition=Ready pod
+        -l app=asteroid
+        -n {{ namespace }}
+        --timeout=300s
+      environment:
+        KUBECONFIG: "{{ ansible_env.HOME }}/.kube/config"
+      register: pod_wait
+      ignore_errors: true
+      when: apply_manifests
+
+    - name: "K8S | Get pod status"
+      command: kubectl get pods -l app=asteroid -n {{ namespace }} -o wide
+      environment:
+        KUBECONFIG: "{{ ansible_env.HOME }}/.kube/config"
+      register: pod_status
+      when: apply_manifests
+
+    - name: "K8S | Display final status"
+      debug:
+        var: pod_status.stdout_lines
+      when: apply_manifests
+
+    # =========================================================================
+    # Summary
+    # =========================================================================
+    - name: "SUMMARY | Deployment complete"
+      debug:
+        msg: |
+          ========================================
+          ASTEROID DEPLOYMENT COMPLETE
+          ========================================
+          Image: {{ image_full }}
+          Namespace: {{ namespace }}
+          Manifests: {{ manifests_dir }}
+          Plan: {{ plan_output }}
+          
+          Monitor Training:
+            kubectl logs -f -l app=asteroid -n {{ namespace }}
+          
+          Check Status:
+            kubectl get pods -l app=asteroid -n {{ namespace }} -o wide
+          
+          Delete Deployment:
+            kubectl delete -f {{ manifests_dir }}/
+          ========================================

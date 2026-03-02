@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel", "build"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asteroid"
+version = "0.1.0"
+description = "Asteroid Scheduler for Distributed Training on GPU Clusters"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "Apache License 2.0"}
+authors = [
+    {name = "Asteroid Team", email = "team@asteroid.io"}
+]
+
+keywords = [
+    "distributed-training",
+    "pytorch",
+    "pipeline-parallelism",
+    "scheduling",
+    "gpu-cluster",
+]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Distributed Computing",
+]
+
+# Core dependencies
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "torchaudio>=2.0.0",
+    "pydantic>=2.0.0,<3.0.0",
+    "pydantic-settings>=2.0.0",
+    "pyyaml>=6.0,<7.0",
+    "numpy>=1.21.0,<2.0.0",
+    "tensorboard>=2.10.0",
+    "tqdm>=4.60.0",
+    "python-dotenv>=0.19.0",
+    "datasets>=2.14.0",
+    "transformers>=4.36.0",
+    "jinja2>=3.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
+    "ruff>=0.1.0",
+]
+all = [
+    "asteroid[dev]",
+]
+
+[project.urls]
+Homepage = "https://github.com/asteroid-project/asteroid"
+Documentation = "https://asteroid-project.github.io/docs"
+Repository = "https://github.com/asteroid-project/asteroid.git"
+
+[tool.setuptools]
+packages = ["asteroid", "asteroid.core", "asteroid.model", "asteroid.planner", "asteroid.ft", "asteroid.optim", "asteroid.utils", "asteroid.comm"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.yml", "*.json"]

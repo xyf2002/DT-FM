@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass, field
-from typing import List, Dict
+from typing import List, Dict, Optional, Any
 
 @dataclass
 class DeviceSpec:
@@ -10,6 +10,31 @@ class DeviceSpec:
     memory_budget_mb: float = 4096.0
     cuda_id: int = 0
     compute_capacity: float = 1.0     # relative throughput factor
+
+
+@dataclass
+class NodeInfo:
+    """Physical node information for Kubernetes deployment."""
+    hostname: str = "localhost"
+    ip: str = "127.0.0.1"
+    nic: str = "eth0"
+    gpu_id: int = 0
+    memory_mb: int = 4096
+    architecture: str = "x86_64"
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "hostname": self.hostname,
+            "ip": self.ip,
+            "nic": self.nic,
+            "gpu_id": self.gpu_id,
+            "memory_mb": self.memory_mb,
+            "architecture": self.architecture,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "NodeInfo":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 @dataclass
 class AsteroidConfig:
@@ -75,3 +100,43 @@ class HPPPlanConfig:
     dominant_step: int = 0
     # estimated HPP-Round latency (ms)
     estimated_latency_ms: float = float('inf')
+    # node_mapping: device_id (rank) -> physical node information for K8s deployment
+    node_mapping: Dict[int, NodeInfo] = field(default_factory=dict)
+    
+    def to_json(self) -> Dict[str, Any]:
+        """Serialize to JSON-compatible dict for hpp_plan.json."""
+        return {
+            "num_stages": self.num_stages,
+            "partition_points": self.partition_points,
+            "device_groups": {str(k): v for k, v in self.device_groups.items()},
+            "micro_batch_alloc": {
+                str(s): {str(d): samples for d, samples in alloc.items()}
+                for s, alloc in self.micro_batch_alloc.items()
+            },
+            "dominant_step": self.dominant_step,
+            "estimated_latency_ms": self.estimated_latency_ms,
+            "node_mapping": {
+                str(k): v.to_dict() for k, v in self.node_mapping.items()
+            },
+            "world_size": sum(len(devs) for devs in self.device_groups.values()),
+        }
+    
+    @classmethod
+    def from_json(cls, data: Dict[str, Any]) -> "HPPPlanConfig":
+        """Deserialize from JSON dict (e.g., loaded hpp_plan.json)."""
+        node_mapping = {}
+        for k, v in data.get("node_mapping", {}).items():
+            node_mapping[int(k)] = NodeInfo.from_dict(v)
+        
+        return cls(
+            num_stages=data.get("num_stages", 2),
+            partition_points=data.get("partition_points", []),
+            device_groups={int(k): v for k, v in data.get("device_groups", {}).items()},
+            micro_batch_alloc={
+                int(s): {int(d): samples for d, samples in alloc.items()}
+                for s, alloc in data.get("micro_batch_alloc", {}).items()
+            },
+            dominant_step=data.get("dominant_step", 0),
+            estimated_latency_ms=data.get("estimated_latency_ms", float('inf')),
+            node_mapping=node_mapping,
+        )

@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+*.egg
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Build artifacts
+dist/
+build/
+*.whl
+
+# Project-specific
+profiles/
+deploy/generated/
+deploy/secrets.yml
+deploy/.asteroid_vault_pass
+hpp_plan.json
+*.log
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+docs/_build/
+*.md
+!README.md

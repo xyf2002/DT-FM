@@ -1,0 +1,179 @@
+[WARNING]: Found variable using reserved name 'namespace'.
+Origin: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/setup_cluster.yml:45:5
+
+43     
+44     # K8s configuration
+45     namespace: default
+       ^ column 5
+
+Using /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/ansible.cfg as config file
+
+PLAY [Asteroid Full Cluster Deployment] ****************************************
+
+TASK [Gathering Facts] *********************************************************
+ok: [localhost]
+
+TASK [BOOTSTRAP | Check if bootstrap needed] ***********************************
+ok: [localhost -> master_node(10.203.54.10)] => {"changed": false, "stat": {"atime": 1772331853.7362015, "attr_flags": "", "attributes": [], "block_size": 4096, "blocks": 0, "charset": "binary", "ctime": 1772331826.4285846, "dev": 2050, "device_type": 0, "executable": true, "exists": true, "gid": 0, "gr_name": "root", "inode": 1708459, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": true, "isreg": false, "issock": false, "isuid": false, "lnk_source": "/usr/bin/python3.12", "lnk_target": "python3", "mimetype": "inode/symlink", "mode": "0777", "mtime": 1772331826.4285846, "nlink": 1, "path": "/opt/asteroid/venv/bin/python", "pw_name": "root", "readable": true, "rgrp": true, "roth": true, "rusr": true, "size": 7, "uid": 0, "version": null, "wgrp": true, "woth": true, "writeable": true, "wusr": true, "xgrp": true, "xoth": true, "xusr": true}}
+
+TASK [BOOTSTRAP | Run bootstrap playbook] **************************************
+skipping: [localhost] => {"changed": false, "false_condition": "not venv_check.stat.exists | default(true)", "skip_reason": "Conditional result was False"}
+
+TASK [PROFILE | Check for existing profiles] ***********************************
+ok: [localhost] => {"changed": false, "examined": 3, "files": [{"atime": 1772384047.2363207, "ctime": 1772384047.2361991, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1441895, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772384047.2361991, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/profiles/profile_ubuntu-2404-desktop-template_rank0.json", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 6438, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}, {"atime": 1772384047.3931875, "ctime": 1772384047.393047, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1441973, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772384047.393047, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/profiles/profile_ubuntu-2404-desktop-template_rank2.json", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 6426, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}, {"atime": 1772384047.871247, "ctime": 1772384047.8711383, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1441978, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772384047.8711383, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/profiles/profile_ubuntu_rank1.json", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 6394, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}], "matched": 3, "msg": "All paths examined", "skipped_paths": {}}
+
+TASK [PROFILE | Display existing profiles] *************************************
+ok: [localhost] => {
+    "msg": "Found 3 existing profile(s)"
+}
+
+TASK [PROFILE | Run profiling playbook] ****************************************
+skipping: [localhost] => {"changed": false, "false_condition": "existing_profiles.matched == 0", "skip_reason": "Conditional result was False"}
+
+TASK [PROFILE | Verify profiles gathered] **************************************
+ok: [localhost] => {"changed": false, "examined": 3, "files": [{"atime": 1772384047.2363207, "ctime": 1772384047.2361991, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1441895, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772384047.2361991, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/profiles/profile_ubuntu-2404-desktop-template_rank0.json", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 6438, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}, {"atime": 1772384047.3931875, "ctime": 1772384047.393047, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1441973, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772384047.393047, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/profiles/profile_ubuntu-2404-desktop-template_rank2.json", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 6426, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}, {"atime": 1772384047.871247, "ctime": 1772384047.8711383, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1441978, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772384047.8711383, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/profiles/profile_ubuntu_rank1.json", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 6394, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}], "matched": 3, "msg": "All paths examined", "skipped_paths": {}}
+
+TASK [PROFILE | Assert profiles exist] *****************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "Found 3 profile(s)"
+}
+
+TASK [PLAN | Run planner] ******************************************************
+changed: [localhost] => {"changed": true, "cmd": ["/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../.venv/bin/python", "run_planner.py", "--profiles-dir", "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../profiles", "--cluster-conf", "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../cluster.conf", "--output", "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json", "--num-stages", "2", "--num-layers", "12"], "delta": "0:00:01.680616", "end": "2026-03-01 19:10:04.028462", "msg": "", "rc": 0, "start": "2026-03-01 19:10:02.347846", "stderr": "2026-03-01 19:10:03,683 | Asteroid | INFO | Planner: 3 stages, partition=[4, 8], latency=794.6ms", "stderr_lines": ["2026-03-01 19:10:03,683 | Asteroid | INFO | Planner: 3 stages, partition=[4, 8], latency=794.6ms"], "stdout": "============================================================\nASTEROID HPP PLANNER\n============================================================\n\nLoading cluster configuration from /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../cluster.conf\n  Found 3 nodes in cluster.conf\n\nLoading profiles from /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../profiles\n  Loaded: profile_ubuntu-2404-desktop-template_rank0.json (hostname: ubuntu-2404-desktop-template, rank: 0)\n  Loaded: profile_ubuntu-2404-desktop-template_rank2.json (hostname: ubuntu-2404-desktop-template, rank: 2)\n  Loaded: profile_ubuntu_rank1.json (hostname: ubuntu, rank: 1)\n  Loaded 3 profile files\n\nMatching profiles to cluster nodes...\n  Rank 0: ubuntu-2404-desktop-template -> 10.203.54.10\n  Rank 1: ubuntu -> 10.203.53.10\n  Rank 2: ubuntu-2404-desktop-template -> 10.203.56.10\n\nBuilding profiler data...\n  Device specs: 3\n  Exec times loaded: 180\n  Bandwidth measurements: 4\n\nRunning DP planner (stages=2, layers=12)...\n\n============================================================\nHPP PLAN GENERATED\n============================================================\nOutput: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json\nStages: 3\nPartition points: [4, 8]\nDevice groups:\n  Stage 0: devices [0]\n  Stage 1: devices [1]\n  Stage 2: devices [2]\nEstimated latency: 794.55 ms\nWorld size: 3\n============================================================", "stdout_lines": ["============================================================", "ASTEROID HPP PLANNER", "============================================================", "", "Loading cluster configuration from /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../cluster.conf", "  Found 3 nodes in cluster.conf", "", "Loading profiles from /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../profiles", "  Loaded: profile_ubuntu-2404-desktop-template_rank0.json (hostname: ubuntu-2404-desktop-template, rank: 0)", "  Loaded: profile_ubuntu-2404-desktop-template_rank2.json (hostname: ubuntu-2404-desktop-template, rank: 2)", "  Loaded: profile_ubuntu_rank1.json (hostname: ubuntu, rank: 1)", "  Loaded 3 profile files", "", "Matching profiles to cluster nodes...", "  Rank 0: ubuntu-2404-desktop-template -> 10.203.54.10", "  Rank 1: ubuntu -> 10.203.53.10", "  Rank 2: ubuntu-2404-desktop-template -> 10.203.56.10", "", "Building profiler data...", "  Device specs: 3", "  Exec times loaded: 180", "  Bandwidth measurements: 4", "", "Running DP planner (stages=2, layers=12)...", "", "============================================================", "HPP PLAN GENERATED", "============================================================", "Output: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json", "Stages: 3", "Partition points: [4, 8]", "Device groups:", "  Stage 0: devices [0]", "  Stage 1: devices [1]", "  Stage 2: devices [2]", "Estimated latency: 794.55 ms", "World size: 3", "============================================================"]}
+
+TASK [PLAN | Display planner output] *******************************************
+ok: [localhost] => {
+    "planner_output.stdout_lines": [
+        "============================================================",
+        "ASTEROID HPP PLANNER",
+        "============================================================",
+        "",
+        "Loading cluster configuration from /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../cluster.conf",
+        "  Found 3 nodes in cluster.conf",
+        "",
+        "Loading profiles from /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../profiles",
+        "  Loaded: profile_ubuntu-2404-desktop-template_rank0.json (hostname: ubuntu-2404-desktop-template, rank: 0)",
+        "  Loaded: profile_ubuntu-2404-desktop-template_rank2.json (hostname: ubuntu-2404-desktop-template, rank: 2)",
+        "  Loaded: profile_ubuntu_rank1.json (hostname: ubuntu, rank: 1)",
+        "  Loaded 3 profile files",
+        "",
+        "Matching profiles to cluster nodes...",
+        "  Rank 0: ubuntu-2404-desktop-template -> 10.203.54.10",
+        "  Rank 1: ubuntu -> 10.203.53.10",
+        "  Rank 2: ubuntu-2404-desktop-template -> 10.203.56.10",
+        "",
+        "Building profiler data...",
+        "  Device specs: 3",
+        "  Exec times loaded: 180",
+        "  Bandwidth measurements: 4",
+        "",
+        "Running DP planner (stages=2, layers=12)...",
+        "",
+        "============================================================",
+        "HPP PLAN GENERATED",
+        "============================================================",
+        "Output: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json",
+        "Stages: 3",
+        "Partition points: [4, 8]",
+        "Device groups:",
+        "  Stage 0: devices [0]",
+        "  Stage 1: devices [1]",
+        "  Stage 2: devices [2]",
+        "Estimated latency: 794.55 ms",
+        "World size: 3",
+        "============================================================"
+    ]
+}
+
+TASK [PLAN | Load generated plan] **********************************************
+ok: [localhost] => {"changed": false, "content": "ewogICJudW1fc3RhZ2VzIjogMywKICAicGFydGl0aW9uX3BvaW50cyI6IFsKICAgIDQsCiAgICA4CiAgXSwKICAiZGV2aWNlX2dyb3VwcyI6IHsKICAgICIwIjogWwogICAgICAwCiAgICBdLAogICAgIjEiOiBbCiAgICAgIDEKICAgIF0sCiAgICAiMiI6IFsKICAgICAgMgogICAgXQogIH0sCiAgIm1pY3JvX2JhdGNoX2FsbG9jIjogewogICAgIjAiOiB7CiAgICAgICIwIjogNAogICAgfSwKICAgICIxIjogewogICAgICAiMSI6IDQKICAgIH0sCiAgICAiMiI6IHsKICAgICAgIjIiOiA0CiAgICB9CiAgfSwKICAiZG9taW5hbnRfc3RlcCI6IDAsCiAgImVzdGltYXRlZF9sYXRlbmN5X21zIjogNzk0LjU1MjE2MjE4NDUyNjMsCiAgIm5vZGVfbWFwcGluZyI6IHsKICAgICIwIjogewogICAgICAiaG9zdG5hbWUiOiAidWJ1bnR1LTI0MDQtZGVza3RvcC10ZW1wbGF0ZSIsCiAgICAgICJpcCI6ICIxMC4yMDMuNTQuMTAiLAogICAgICAibmljIjogImVuczMzIiwKICAgICAgImdwdV9pZCI6IDAsCiAgICAgICJtZW1vcnlfbWIiOiA0NTQ1OSwKICAgICAgImFyY2hpdGVjdHVyZSI6ICJ4ODZfNjQiCiAgICB9LAogICAgIjEiOiB7CiAgICAgICJob3N0bmFtZSI6ICJ1YnVudHUiLAogICAgICAiaXAiOiAiMTAuMjAzLjUzLjEwIiwKICAgICAgIm5pYyI6ICJlbnMzMyIsCiAgICAgICJncHVfaWQiOiAwLAogICAgICAibWVtb3J5X21iIjogNDU0NTksCiAgICAgICJhcmNoaXRlY3R1cmUiOiAieDg2XzY0IgogICAgfSwKICAgICIyIjogewogICAgICAiaG9zdG5hbWUiOiAidWJ1bnR1LTI0MDQtZGVza3RvcC10ZW1wbGF0ZSIsCiAgICAgICJpcCI6ICIxMC4yMDMuNTYuMTAiLAogICAgICAibmljIjogImVuczMzIiwKICAgICAgImdwdV9pZCI6IDAsCiAgICAgICJtZW1vcnlfbWIiOiA0NTQ1OSwKICAgICAgImFyY2hpdGVjdHVyZSI6ICJ4ODZfNjQiCiAgICB9CiAgfSwKICAid29ybGRfc2l6ZSI6IDMKfQ==", "encoding": "base64", "source": "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json"}
+
+TASK [PLAN | Display plan summary] *********************************************
+ok: [localhost] => {
+    "msg": "HPP Plan Generated:\n- Stages: 3\n- World Size: 3\n- Partition: [4, 8]\n"
+}
+
+TASK [IMAGE | Build and distribute image] **************************************
+skipping: [localhost] => {"changed": false, "false_condition": "not skip_build", "skip_reason": "Conditional result was False"}
+
+TASK [MANIFESTS | Generate K8s manifests] **************************************
+changed: [localhost] => {"changed": true, "cmd": ["/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../.venv/bin/python", "generate_manifests.py", "--plan", "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json", "--image", "asteroid:latest", "--namespace", "default", "--master-port", "29500", "--output-dir", "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated"], "delta": "0:00:00.205367", "end": "2026-03-01 19:10:05.370416", "msg": "", "rc": 0, "start": "2026-03-01 19:10:05.165049", "stderr": "", "stderr_lines": [], "stdout": "============================================================\nASTEROID K8S MANIFEST GENERATOR\n============================================================\nPlan: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json\nTemplates: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/templates\nOutput: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated\nImage: asteroid:latest\nNamespace: default\n\nLoading plan from /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json...\n  World size: 3\n  Stages: 3\n\nGenerating ConfigMap...\n[CREATED] /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/00-configmap.yaml\nGenerating Headless Service...\n[CREATED] /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/01-headless-service.yaml\nGenerating Worker Jobs...\n[CREATED] /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-0.yaml\n[CREATED] /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-1.yaml\n[CREATED] /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-2.yaml\n\n============================================================\nGenerated 6 files:\n  - ConfigMap: 00-configmap.yaml\n  - Service: 01-headless-service.yaml\n  - Job (Rank 0, Stage 0): 02-job-rank-0.yaml\n  - Job (Rank 1, Stage 1): 02-job-rank-1.yaml\n  - Job (Rank 2, Stage 2): 02-job-rank-2.yaml\n  - Apply Script: apply.sh\n============================================================\n\nTo apply manually:\n  kubectl apply -f /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/\n\nOr use the apply script:\n  bash /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/apply.sh", "stdout_lines": ["============================================================", "ASTEROID K8S MANIFEST GENERATOR", "============================================================", "Plan: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json", "Templates: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/templates", "Output: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated", "Image: asteroid:latest", "Namespace: default", "", "Loading plan from /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json...", "  World size: 3", "  Stages: 3", "", "Generating ConfigMap...", "[CREATED] /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/00-configmap.yaml", "Generating Headless Service...", "[CREATED] /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/01-headless-service.yaml", "Generating Worker Jobs...", "[CREATED] /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-0.yaml", "[CREATED] /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-1.yaml", "[CREATED] /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-2.yaml", "", "============================================================", "Generated 6 files:", "  - ConfigMap: 00-configmap.yaml", "  - Service: 01-headless-service.yaml", "  - Job (Rank 0, Stage 0): 02-job-rank-0.yaml", "  - Job (Rank 1, Stage 1): 02-job-rank-1.yaml", "  - Job (Rank 2, Stage 2): 02-job-rank-2.yaml", "  - Apply Script: apply.sh", "============================================================", "", "To apply manually:", "  kubectl apply -f /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/", "", "Or use the apply script:", "  bash /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/apply.sh"]}
+
+TASK [MANIFESTS | Display generation output] ***********************************
+ok: [localhost] => {
+    "manifest_output.stdout_lines": [
+        "============================================================",
+        "ASTEROID K8S MANIFEST GENERATOR",
+        "============================================================",
+        "Plan: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json",
+        "Templates: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/templates",
+        "Output: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated",
+        "Image: asteroid:latest",
+        "Namespace: default",
+        "",
+        "Loading plan from /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json...",
+        "  World size: 3",
+        "  Stages: 3",
+        "",
+        "Generating ConfigMap...",
+        "[CREATED] /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/00-configmap.yaml",
+        "Generating Headless Service...",
+        "[CREATED] /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/01-headless-service.yaml",
+        "Generating Worker Jobs...",
+        "[CREATED] /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-0.yaml",
+        "[CREATED] /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-1.yaml",
+        "[CREATED] /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-2.yaml",
+        "",
+        "============================================================",
+        "Generated 6 files:",
+        "  - ConfigMap: 00-configmap.yaml",
+        "  - Service: 01-headless-service.yaml",
+        "  - Job (Rank 0, Stage 0): 02-job-rank-0.yaml",
+        "  - Job (Rank 1, Stage 1): 02-job-rank-1.yaml",
+        "  - Job (Rank 2, Stage 2): 02-job-rank-2.yaml",
+        "  - Apply Script: apply.sh",
+        "============================================================",
+        "",
+        "To apply manually:",
+        "  kubectl apply -f /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/",
+        "",
+        "Or use the apply script:",
+        "  bash /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/apply.sh"
+    ]
+}
+
+TASK [MANIFESTS | List generated files] ****************************************
+ok: [localhost] => {"changed": false, "examined": 6, "files": [{"atime": 1772386691.1313722, "ctime": 1772392205.346913, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1444088, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772392205.346913, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/01-headless-service.yaml", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 680, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}, {"atime": 1772386691.1353722, "ctime": 1772392205.358985, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1444090, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772392205.358985, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-1.yaml", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 6098, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}, {"atime": 1772386691.136372, "ctime": 1772392205.3590903, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1444091, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772392205.3590903, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-2.yaml", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 6142, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}, {"atime": 1772386582.1075203, "ctime": 1772392205.3588321, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1444089, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772392205.3588321, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-0.yaml", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 5541, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}, {"atime": 1772386691.1183722, "ctime": 1772392205.2321951, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1444087, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772392205.2321951, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/00-configmap.yaml", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 1584, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}], "matched": 5, "msg": "All paths examined", "skipped_paths": {}}
+
+TASK [MANIFESTS | Display generated files] *************************************
+ok: [localhost] => {
+    "msg": "Generated 5 manifest files"
+}
+
+TASK [K8S | Create namespace] **************************************************
+[ERROR]: Task failed: Module failed: non-zero return code
+Origin: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/setup_cluster.yml:188:7
+
+186     # Phase 5: Deploy to K8s
+187     # =========================================================================
+188     - name: "K8S | Create namespace"
+          ^ column 7
+
+fatal: [localhost]: FAILED! => {"changed": true, "cmd": ["kubectl", "create", "namespace", "default"], "delta": "0:00:00.215634", "end": "2026-03-01 19:10:06.491979", "msg": "non-zero return code", "rc": 1, "start": "2026-03-01 19:10:06.276345", "stderr": "The connection to the server localhost:8080 was refused - did you specify the right host or port?", "stderr_lines": ["The connection to the server localhost:8080 was refused - did you specify the right host or port?"], "stdout": "", "stdout_lines": []}
+...ignoring
+
+TASK [K8S | Apply manifests] ***************************************************
+[ERROR]: Task failed: Module failed: non-zero return code
+Origin: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/setup_cluster.yml:193:7
+
+191       when: apply_manifests
+192
+193     - name: "K8S | Apply manifests"
+          ^ column 7
+
+fatal: [localhost]: FAILED! => {"changed": true, "cmd": ["kubectl", "apply", "-f", "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/"], "delta": "0:00:00.196216", "end": "2026-03-01 19:10:07.147423", "msg": "non-zero return code", "rc": 1, "start": "2026-03-01 19:10:06.951207", "stderr": "error validating \"/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/00-configmap.yaml\": error validating data: failed to download openapi: Get \"http://localhost:8080/openapi/v2?timeout=32s\": dial tcp 127.0.0.1:8080: connect: connection refused; if you choose to ignore these errors, turn validation off with --validate=false\nerror validating \"/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/01-headless-service.yaml\": error validating data: failed to download openapi: Get \"http://localhost:8080/openapi/v2?timeout=32s\": dial tcp 127.0.0.1:8080: connect: connection refused; if you choose to ignore these errors, turn validation off with --validate=false\nerror validating \"/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-0.yaml\": error validating data: failed to download openapi: Get \"http://localhost:8080/openapi/v2?timeout=32s\": dial tcp 127.0.0.1:8080: connect: connection refused; if you choose to ignore these errors, turn validation off with --validate=false\nerror validating \"/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-1.yaml\": error validating data: failed to download openapi: Get \"http://localhost:8080/openapi/v2?timeout=32s\": dial tcp 127.0.0.1:8080: connect: connection refused; if you choose to ignore these errors, turn validation off with --validate=false\nerror validating \"/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-2.yaml\": error validating data: failed to download openapi: Get \"http://localhost:8080/openapi/v2?timeout=32s\": dial tcp 127.0.0.1:8080: connect: connection refused; if you choose to ignore these errors, turn validation off with --validate=false", "stderr_lines": ["error validating \"/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/00-configmap.yaml\": error validating data: failed to download openapi: Get \"http://localhost:8080/openapi/v2?timeout=32s\": dial tcp 127.0.0.1:8080: connect: connection refused; if you choose to ignore these errors, turn validation off with --validate=false", "error validating \"/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/01-headless-service.yaml\": error validating data: failed to download openapi: Get \"http://localhost:8080/openapi/v2?timeout=32s\": dial tcp 127.0.0.1:8080: connect: connection refused; if you choose to ignore these errors, turn validation off with --validate=false", "error validating \"/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-0.yaml\": error validating data: failed to download openapi: Get \"http://localhost:8080/openapi/v2?timeout=32s\": dial tcp 127.0.0.1:8080: connect: connection refused; if you choose to ignore these errors, turn validation off with --validate=false", "error validating \"/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-1.yaml\": error validating data: failed to download openapi: Get \"http://localhost:8080/openapi/v2?timeout=32s\": dial tcp 127.0.0.1:8080: connect: connection refused; if you choose to ignore these errors, turn validation off with --validate=false", "error validating \"/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/generated/02-job-rank-2.yaml\": error validating data: failed to download openapi: Get \"http://localhost:8080/openapi/v2?timeout=32s\": dial tcp 127.0.0.1:8080: connect: connection refused; if you choose to ignore these errors, turn validation off with --validate=false"], "stdout": "", "stdout_lines": []}
+
+PLAY RECAP *********************************************************************
+localhost                  : ok=15   changed=3    unreachable=0    failed=1    skipped=3    rescued=0    ignored=1   
+

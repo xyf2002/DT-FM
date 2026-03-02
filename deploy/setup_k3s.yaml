@@ -1,0 +1,141 @@
+---
+# ============================================================================
+# K3s Cluster Setup Playbook
+# ============================================================================
+# Installs K3s on master node and joins worker nodes to the cluster.
+#
+# Usage:
+#   ansible-playbook -i inventory.ini setup_k3s.yaml -v -k -K
+#
+# After running:
+#   kubectl get nodes   # verify all nodes joined
+# ============================================================================
+
+- name: Setup K3s Master Node
+  hosts: master
+  become: true
+  vars_files:
+    - secrets.yml
+  tasks:
+    - name: Check if k3s is already installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_installed
+
+    - name: Install curl if missing
+      apt:
+        name: curl
+        state: present
+        update_cache: yes
+      when: not k3s_installed.stat.exists
+
+    - name: Install k3s on master
+      shell: |
+        curl -sfL https://get.k3s.io | sh -s - server \
+          --write-kubeconfig-mode 644 \
+          --disable traefik \
+          --disable servicelb \
+          --flannel-iface {{ ansible_default_ipv4.interface | default('eth0') }}
+      args:
+        creates: /usr/local/bin/k3s
+      when: not k3s_installed.stat.exists
+
+    - name: Wait for k3s to be ready
+      wait_for:
+        path: /etc/rancher/k3s/k3s.yaml
+        state: present
+        timeout: 120
+
+    - name: Get node token
+      slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: k3s_token
+
+    - name: Set token fact
+      set_fact:
+        k3s_node_token: "{{ k3s_token.content | b64decode | trim }}"
+
+    - name: Get master IP
+      set_fact:
+        k3s_master_ip: "{{ ansible_default_ipv4.address }}"
+
+    - name: Display k3s master info
+      debug:
+        msg: |
+          K3s Master installed successfully!
+          Master IP: {{ k3s_master_ip }}
+          Token: {{ k3s_node_token[:20] }}...
+
+- name: Setup K3s Worker Nodes
+  hosts: workers
+  become: true
+  vars_files:
+    - secrets.yml
+  tasks:
+    - name: Get master info from master node
+      set_fact:
+        k3s_master_ip: "{{ hostvars[groups['master'][0]]['k3s_master_ip'] }}"
+        k3s_node_token: "{{ hostvars[groups['master'][0]]['k3s_node_token'] }}"
+
+    - name: Check if k3s-agent is already installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_agent_installed
+
+    - name: Install curl if missing on workers
+      apt:
+        name: curl
+        state: present
+        update_cache: yes
+      when: not k3s_agent_installed.stat.exists
+
+    - name: Install k3s agent on workers
+      shell: |
+        curl -sfL https://get.k3s.io | K3S_URL=https://{{ k3s_master_ip }}:6443 K3S_TOKEN={{ k3s_node_token }} sh -
+      args:
+        creates: /usr/local/bin/k3s
+      when: not k3s_agent_installed.stat.exists
+
+    - name: Wait for k3s-agent to start
+      systemd:
+        name: k3s-agent
+        state: started
+        enabled: true
+
+- name: Configure kubectl on control node
+  hosts: localhost
+  become: false
+  vars_files:
+    - secrets.yml
+  vars:
+    master_ip: "{{ hostvars[groups['master'][0]]['ansible_host'] | default(groups['master'][0]) }}"
+  tasks:
+    - name: Create .kube directory
+      file:
+        path: "{{ ansible_env.HOME }}/.kube"
+        state: directory
+        mode: '0755'
+
+    - name: Fetch kubeconfig from master
+      delegate_to: "{{ groups['master'][0] }}"
+      slurp:
+        src: /etc/rancher/k3s/k3s.yaml
+      register: kubeconfig_content
+      become: true
+
+    - name: Write kubeconfig locally
+      copy:
+        content: "{{ kubeconfig_content.content | b64decode | regex_replace('127.0.0.1', master_ip) }}"
+        dest: "{{ ansible_env.HOME }}/.kube/config"
+        mode: '0600'
+
+    - name: Verify cluster access
+      command: kubectl get nodes
+      register: kubectl_nodes
+      changed_when: false
+
+    - name: Display cluster status
+      debug:
+        msg: |
+          K3s Cluster Ready!
+          {{ kubectl_nodes.stdout }}

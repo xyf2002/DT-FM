@@ -1,20 +1,86 @@
+#!/usr/bin/env python3
+"""
+Asteroid Worker - Multi-node distributed training worker.
+
+This script is designed to be launched by Kubernetes with environment variables:
+  - RANK: Global rank of this worker
+  - WORLD_SIZE: Total number of workers
+  - MASTER_ADDR: Hostname/IP of rank 0 (headless service DNS)
+  - MASTER_PORT: Port for distributed communication
+  - NCCL_SOCKET_IFNAME: Network interface for NCCL
+  - CUDA_VISIBLE_DEVICES: GPU to use
+  - HPP_PLAN_PATH: Path to hpp_plan.json
+
+For local testing with mp.spawn, run with --local flag:
+  python worker.py --local --world-size 3
+
+Usage (K8s mode - env vars injected by K8s):
+  python worker.py
+
+Usage (local testing):
+  python worker.py --local --world-size 3 --num-stages 2
+"""
+
 import os
+import sys
+import json
+import argparse
 
 # =============================================================================
-# 1. HARDWARE ISOLATION (MUST BE AT THE VERY TOP)
-# Hides all GPUs except 5, 6, and 7. PyTorch will see them as cuda:0, cuda:1, cuda:2.
+# Environment Setup - Must happen BEFORE importing torch
 # =============================================================================
-os.environ["CUDA_VISIBLE_DEVICES"] = "5,6,7"
 
-# IMPORTANT: Do NOT set CUDA_LAUNCH_BLOCKING=1 with NCCL - it causes deadlocks
-os.environ["CUDA_LAUNCH_BLOCKING"] = "0"
-os.environ["NCCL_SOCKET_IFNAME"] = "lo"
-os.environ["NCCL_P2P_DISABLE"] = "1"
-os.environ["NCCL_IB_DISABLE"] = "1"
-os.environ["NCCL_SHM_DISABLE"] = "0"
-os.environ["NCCL_DEBUG"] = "WARN"
-os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+def _setup_multinode_env():
+    """
+    Setup environment for multi-node execution.
+    Reads from K8s-injected environment variables.
+    """
+    # Validate required environment variables
+    required = ["RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"]
+    missing = [var for var in required if var not in os.environ]
+    
+    if missing:
+        print(f"[ENV] Missing required vars: {missing}", file=sys.stderr)
+        print("[ENV] Running in local mode with defaults...", file=sys.stderr)
+        return False
+    
+    # Set NCCL configuration from env (injected by K8s template)
+    os.environ.setdefault("NCCL_SOCKET_IFNAME", "eth0")
+    os.environ.setdefault("NCCL_P2P_DISABLE", "1")
+    os.environ.setdefault("NCCL_IB_DISABLE", "1")
+    os.environ.setdefault("NCCL_SHM_DISABLE", "0")
+    os.environ.setdefault("NCCL_DEBUG", "WARN")
+    os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "0")
+    
+    return True
 
+
+def _setup_local_env(world_size: int, port: int = None):
+    """
+    Setup environment for local mp.spawn testing.
+    """
+    import random
+    
+    if port is None:
+        port = random.randint(20000, 30000)
+    
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", ",".join(str(i) for i in range(world_size)))
+    os.environ.setdefault("NCCL_SOCKET_IFNAME", "lo")
+    os.environ.setdefault("NCCL_P2P_DISABLE", "1")
+    os.environ.setdefault("NCCL_IB_DISABLE", "1")
+    os.environ.setdefault("NCCL_SHM_DISABLE", "0")
+    os.environ.setdefault("NCCL_DEBUG", "WARN")
+    os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "0")
+    
+    return port
+
+
+# Determine execution mode before importing torch
+_MULTINODE_MODE = _setup_multinode_env()
+
+# Now safe to import torch
 import time
 import random
 from datetime import timedelta
@@ -30,21 +96,49 @@ from asteroid.core.state import AsteroidStateManager
 from asteroid.utils.logger import EVENT_LOGGER, logger
 from asteroid.model.stage import AsteroidStage
 from asteroid.optim.optim_utils import flatten_params, get_lr
-# Note: Using torch.distributed for pipeline communication instead of raw NCCL
 from asteroid.ft.fault_tolerance import AsteroidFaultTolerance
 from asteroid.utils.data_utils import prepare_sst2
 from asteroid.planner.profiler import AsteroidProfiler
 from asteroid.planner.dp_planner import AsteroidPlanner
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    HAS_TENSORBOARD = True
+except ImportError:
+    HAS_TENSORBOARD = False
+
 def worker(rank: int, cfg: AsteroidConfig,
            train_data: Tuple[torch.Tensor, torch.Tensor],
            val_data: Tuple[torch.Tensor, torch.Tensor],
-           plan: Optional[HPPPlanConfig] = None):
+           plan: Optional[HPPPlanConfig] = None,
+           use_env_init: bool = False):
+    """
+    Main worker function for distributed training.
     
-    cuda_id = rank % torch.cuda.device_count()
+    Args:
+        rank: Global rank of this worker
+        cfg: Asteroid configuration
+        train_data: (embeddings, labels) training data
+        val_data: (embeddings, labels) validation data
+        plan: HPP execution plan (optional)
+        use_env_init: If True, use env:// init method (for K8s)
+    """
+    # Device selection - use CUDA_VISIBLE_DEVICES if set, otherwise map by rank
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        # K8s sets CUDA_VISIBLE_DEVICES to single GPU, so use cuda:0
+        visible_devices = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
+        if len(visible_devices) == 1:
+            cuda_id = 0
+        else:
+            cuda_id = rank % len(visible_devices)
+    else:
+        cuda_id = rank % torch.cuda.device_count()
+    
     device = torch.device(f'cuda:{cuda_id}')
     torch.cuda.set_device(device)
     torch.manual_seed(cfg.seed + rank)
+    
+    print(f"[RANK {rank}] Device: cuda:{cuda_id} ({torch.cuda.get_device_name(device)})", flush=True)
 
     if plan is not None and plan.device_groups:
         _rank_to_stage, _rank_to_dp_pos, _stage_sizes = {}, {}, {}
@@ -79,10 +173,23 @@ def worker(rank: int, cfg: AsteroidConfig,
     state.plan = plan
 
     if not torch.distributed.is_initialized():
-        torch.distributed.init_process_group(
-            backend='nccl', init_method=cfg.dist_url,
-            world_size=cfg.world_size, rank=rank,
-            timeout=timedelta(seconds=120))
+        if use_env_init:
+            # Multi-node mode: use env:// which reads MASTER_ADDR, MASTER_PORT, RANK, WORLD_SIZE
+            print(f"[RANK {rank}] Initializing distributed (env://)...", flush=True)
+            torch.distributed.init_process_group(
+                backend='nccl',
+                init_method='env://',
+                timeout=timedelta(seconds=300))
+        else:
+            # Local mode: use explicit URL
+            print(f"[RANK {rank}] Initializing distributed ({cfg.dist_url})...", flush=True)
+            torch.distributed.init_process_group(
+                backend='nccl', 
+                init_method=cfg.dist_url,
+                world_size=cfg.world_size, 
+                rank=rank,
+                timeout=timedelta(seconds=120))
+        print(f"[RANK {rank}] Distributed initialized successfully", flush=True)
 
     pp_process_group, pp_ranks_in_group = None, None
     dp_process_group, dp_ranks_in_group = None, None
@@ -202,6 +309,15 @@ def worker(rank: int, cfg: AsteroidConfig,
     best_val_loss = float('inf')
     t0 = time.time()
 
+    # TensorBoard writer — every rank logs per-node metrics
+    tb_writer = None
+    if HAS_TENSORBOARD:
+        tb_base_dir = os.environ.get("TENSORBOARD_LOG_DIR", "/tmp/asteroid_tb_logs")
+        tb_log_dir = os.path.join(tb_base_dir, f"rank-{rank}")
+        os.makedirs(tb_log_dir, exist_ok=True)
+        tb_writer = SummaryWriter(log_dir=tb_log_dir, flush_secs=30)
+        print(f"[RANK {rank}] TensorBoard logging to {tb_log_dir}", flush=True)
+
     print(f"[RANK {rank}] Ready. Starting GPIPE Loop...", flush=True)
 
     for iter_num in range(cfg.max_iters):
@@ -227,6 +343,7 @@ def worker(rank: int, cfg: AsteroidConfig,
 
         # ── GPipe FORWARD ──────────────────────────────────────────
         # Use torch.distributed.send/recv for reliable pipeline communication
+        fwd_start = time.time()
         for m in range(num_micro):
             if is_single:
                 x, y = sample_batch_for(train_embeds, train_labels, cfg.micro_batch_size, iter_num, m)
@@ -258,10 +375,14 @@ def worker(rank: int, cfg: AsteroidConfig,
                     torch.distributed.send(out.data.contiguous(), dst=pp_next_global)
 
         # Barrier ensures all forwards are queued safely
+        fwd_end = time.time()
+        barrier_start = time.time()
         torch.distributed.barrier()
+        barrier_fwd_end = time.time()
 
         # ── GPipe BACKWARD ─────────────────────────────────────────
         # Use torch.distributed.send/recv for reliable pipeline communication
+        bwd_start = time.time()
         for m in reversed(range(num_micro)):
             if is_single:
                 cached_outputs[m].backward()
@@ -289,6 +410,7 @@ def worker(rank: int, cfg: AsteroidConfig,
 
         # Synchronize GPU ONCE at the end of the iteration before optimizer step
         torch.cuda.synchronize()
+        bwd_end = time.time()
 
         # Late loss scaling to avoid async stream blockage
         if is_last or is_single:
@@ -303,7 +425,9 @@ def worker(rank: int, cfg: AsteroidConfig,
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         
         optimizer.step()
+        barrier_step_start = time.time()
         torch.distributed.barrier()
+        barrier_step_end = time.time()
 
         if iter_num % cfg.ft_check_interval == 0 and iter_num > 0:
             state.record_backward(iter_num)
@@ -316,11 +440,45 @@ def worker(rank: int, cfg: AsteroidConfig,
         t1 = time.time()
         dt = t1 - t0
         t0 = t1
+
+        # Per-rank TensorBoard logging (all ranks)
+        if tb_writer is not None and iter_num % cfg.log_interval == 0:
+            fwd_ms = (fwd_end - fwd_start) * 1000
+            bwd_ms = (bwd_end - bwd_start) * 1000
+            barrier_fwd_ms = (barrier_fwd_end - barrier_start) * 1000
+            barrier_step_ms = (barrier_step_end - barrier_step_start) * 1000
+            gpu_mem_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
+            gpu_mem_reserved_mb = torch.cuda.max_memory_reserved(device) / (1024 * 1024)
+
+            tb_writer.add_scalar("timing/forward_ms", fwd_ms, iter_num)
+            tb_writer.add_scalar("timing/backward_ms", bwd_ms, iter_num)
+            tb_writer.add_scalar("timing/barrier_after_fwd_ms", barrier_fwd_ms, iter_num)
+            tb_writer.add_scalar("timing/barrier_after_step_ms", barrier_step_ms, iter_num)
+            tb_writer.add_scalar("timing/total_step_ms", dt * 1000, iter_num)
+            tb_writer.add_scalar("gpu/peak_memory_allocated_MB", gpu_mem_mb, iter_num)
+            tb_writer.add_scalar("gpu/peak_memory_reserved_MB", gpu_mem_reserved_mb, iter_num)
+            tb_writer.add_scalar("gpu/memory_utilization_pct",
+                                 torch.cuda.memory_allocated(device) / torch.cuda.max_memory_reserved(device) * 100
+                                 if torch.cuda.max_memory_reserved(device) > 0 else 0, iter_num)
+
+            if iter_num % (cfg.log_interval * 5) == 0:
+                tb_writer.flush()
+
         if (is_last or is_single) and iter_num % cfg.log_interval == 0:
             tps = cfg.global_batch_size * cfg.max_seq_len / dt if dt > 0 else 0
             print(f"  iter {iter_num:>5d} | loss={avg_loss:.4f} | lr={lr:.2e} | {tps:,.0f} tok/s | dt={dt*1000:.1f}ms", flush=True)
 
+            # Log training metrics to TensorBoard (last stage only)
+            if tb_writer is not None:
+                tb_writer.add_scalar("train/loss", avg_loss, iter_num)
+                tb_writer.add_scalar("train/learning_rate", lr, iter_num)
+                tb_writer.add_scalar("train/throughput_tok_s", tps, iter_num)
+
     ft.stop_heartbeat()
+    if tb_writer is not None:
+        tb_writer.flush()
+        tb_writer.close()
+        print(f"[RANK {rank}] TensorBoard logs finalized.", flush=True)
     torch.distributed.barrier()
     print(f"[RANK {rank}] Training complete.", flush=True)
     torch.distributed.destroy_process_group()
@@ -419,39 +577,153 @@ def _run_isolated_hardware_profiling(cfg, devices, queue):
         'activation_sizes': profiler.activation_sizes
     })
 
-if __name__ == "__main__":
-    from asteroid.model.stage import _create_block
-    import random
+
+def load_hpp_plan(path: str) -> HPPPlanConfig:
+    """Load HPP plan from JSON file."""
+    with open(path, "r") as f:
+        data = json.load(f)
+    return HPPPlanConfig.from_json(data)
+
+
+def _worker_wrapper(rank: int, cfg: AsteroidConfig, train_data, val_data, plan, use_env_init: bool):
+    """Wrapper for mp.spawn that passes all arguments."""
+    worker(rank, cfg, train_data, val_data, plan, use_env_init)
+
+
+def main_multinode():
+    """
+    Entry point for multi-node execution (K8s mode).
+    Reads configuration from environment variables.
+    """
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
     
-    port = random.randint(20000, 30000)
+    print(f"[RANK {rank}] Starting Asteroid worker (multi-node mode)")
+    print(f"[RANK {rank}] MASTER_ADDR={os.environ['MASTER_ADDR']}")
+    print(f"[RANK {rank}] MASTER_PORT={os.environ['MASTER_PORT']}")
+    print(f"[RANK {rank}] WORLD_SIZE={world_size}")
+    print(f"[RANK {rank}] NCCL_SOCKET_IFNAME={os.environ.get('NCCL_SOCKET_IFNAME', 'not set')}")
+    
+    # Load HPP plan
+    plan_path = os.environ.get("HPP_PLAN_PATH", "./hpp_plan.json")
+    plan = None
+    
+    if os.path.exists(plan_path):
+        print(f"[RANK {rank}] Loading HPP plan from {plan_path}")
+        plan = load_hpp_plan(plan_path)
+        print(f"[RANK {rank}] Plan: {plan.num_stages} stages, partition={plan.partition_points}")
+    else:
+        print(f"[RANK {rank}] No HPP plan found at {plan_path}, using default configuration")
+    
+    # Build config
     cfg = AsteroidConfig(
-        world_size=3, 
-        num_stages=3,
+        world_size=world_size,
+        num_stages=plan.num_stages if plan else 2,
+    )
+    
+    # Load data
+    print(f"[RANK {rank}] Loading dataset...")
+    train_data, val_data = prepare_sst2(cfg)
+    print(f"[RANK {rank}] Data loaded: train={train_data[0].shape}")
+    
+    # Run worker with env:// init
+    worker(rank, cfg, train_data, val_data, plan, use_env_init=True)
+    
+    print(f"[RANK {rank}] Worker finished")
+
+
+def main_local(args):
+    """
+    Entry point for local testing with mp.spawn.
+    """
+    from asteroid.model.stage import _create_block
+    
+    port = _setup_local_env(args.world_size, args.port)
+    
+    cfg = AsteroidConfig(
+        world_size=args.world_size, 
+        num_stages=args.num_stages,
         dist_url=f"tcp://127.0.0.1:{port}"
     )
-
-    devices = [DeviceSpec(device_id=i, memory_budget_mb=8192.0) for i in range(cfg.world_size)]
-
-    print(f"Phase 1: Running Actual Hardware Profiling (Mapping to Physical 4,5,6)...")
     
-    ctx = mp.get_context('spawn')
-    q = ctx.Queue()
-    p = ctx.Process(target=_run_isolated_hardware_profiling, args=(cfg, devices, q))
-    p.start()
-    profiler_data = q.get()
-    p.join()
+    devices = [DeviceSpec(device_id=i, memory_budget_mb=8192.0) for i in range(cfg.world_size)]
+    plan = None
+    
+    if args.plan:
+        print(f"Loading HPP plan from {args.plan}...")
+        plan = load_hpp_plan(args.plan)
+    elif not args.skip_profiling:
+        print(f"Phase 1: Running Hardware Profiling...")
+        
+        ctx = mp.get_context('spawn')
+        q = ctx.Queue()
+        p = ctx.Process(target=_run_isolated_hardware_profiling, args=(cfg, devices, q))
+        p.start()
+        profiler_data = q.get()
+        p.join()
 
-    profiler = AsteroidProfiler(cfg, devices)
-    profiler.exec_times = profiler_data['exec_times']
-    profiler.weight_sizes = profiler_data['weight_sizes']
-    profiler.activation_sizes = profiler_data['activation_sizes']
+        profiler = AsteroidProfiler(cfg, devices)
+        profiler.exec_times = profiler_data['exec_times']
+        profiler.weight_sizes = profiler_data['weight_sizes']
+        profiler.activation_sizes = profiler_data['activation_sizes']
 
-    print("Phase 2: Planning Stage...")
-    plan = AsteroidPlanner(profiler, cfg, devices).plan()
+        print("Phase 2: Planning Stage...")
+        plan = AsteroidPlanner(profiler, cfg, devices).plan()
     
     print("Phase 3: Dataset Preparation...")
     train_data, val_data = prepare_sst2(cfg)
 
     print(f"\nPhase 4: Spawning {cfg.world_size} workers on port {port}...")
     
-    mp.spawn(worker, args=(cfg, train_data, val_data, plan), nprocs=cfg.world_size, join=True)
+    mp.spawn(
+        _worker_wrapper, 
+        args=(cfg, train_data, val_data, plan, False),
+        nprocs=cfg.world_size, 
+        join=True
+    )
+
+
+def main():
+    """Main entry point - dispatches to local or multi-node mode."""
+    parser = argparse.ArgumentParser(
+        description="Asteroid Distributed Training Worker",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    
+    parser.add_argument(
+        "--local", action="store_true",
+        help="Run in local mode with mp.spawn (for testing)"
+    )
+    parser.add_argument(
+        "--world-size", type=int, default=3,
+        help="Number of workers (local mode only, default: 3)"
+    )
+    parser.add_argument(
+        "--num-stages", type=int, default=2,
+        help="Number of pipeline stages (local mode only, default: 2)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=None,
+        help="Master port (local mode only, default: random)"
+    )
+    parser.add_argument(
+        "--plan", type=str, default=None,
+        help="Path to hpp_plan.json (optional)"
+    )
+    parser.add_argument(
+        "--skip-profiling", action="store_true",
+        help="Skip hardware profiling (local mode only)"
+    )
+    
+    args = parser.parse_args()
+    
+    if args.local or not _MULTINODE_MODE:
+        # Local testing mode with mp.spawn
+        main_local(args)
+    else:
+        # K8s multi-node mode
+        main_multinode()
+
+
+if __name__ == "__main__":
+    main()

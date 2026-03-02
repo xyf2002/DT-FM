@@ -1,0 +1,135 @@
+---
+# ============================================================================
+# Distribute Docker Image to Edge Nodes
+# ============================================================================
+# For edge clusters with limited bandwidth or air-gapped environments,
+# this playbook builds the image locally and distributes it via tarball.
+#
+# Usage:
+#   ansible-playbook distribute_image.yaml -v
+#   ansible-playbook distribute_image.yaml -e "image_tag=v1.0.0" -v
+#
+# Prerequisites:
+#   - Docker installed on master node
+#   - Docker or containerd installed on worker nodes
+
+- name: Distribute Asteroid Docker Image
+  hosts: cluster
+  gather_facts: true
+  vars_files:
+    - secrets.yml
+  vars:
+    image_name: asteroid
+    image_tag: "{{ lookup('env', 'IMAGE_TAG') | default('latest', true) }}"
+    image_full: "{{ image_name }}:{{ image_tag }}"
+    image_tarball_local: "{{ playbook_dir }}/../asteroid_image.tar"
+    image_tarball_remote: /tmp/asteroid_image.tar
+    project_root: "{{ playbook_dir }}/.."
+
+  tasks:
+    # =========================================================================
+    # Phase 1: Build Image on Master/Local
+    # =========================================================================
+    - name: "BUILD | Build Docker image"
+      command: >
+        docker build 
+        -t {{ image_full }}
+        -f Dockerfile
+        .
+      args:
+        chdir: "{{ project_root }}"
+      delegate_to: localhost
+      run_once: true
+      register: build_result
+
+    - name: "BUILD | Display build result"
+      debug:
+        msg: "Image built: {{ image_full }}"
+      run_once: true
+
+    # =========================================================================
+    # Phase 2: Export Image to Tarball
+    # =========================================================================
+    - name: "EXPORT | Save image to tarball"
+      command: docker save -o {{ image_tarball_local }} {{ image_full }}
+      delegate_to: localhost
+      run_once: true
+
+    - name: "EXPORT | Get tarball size"
+      stat:
+        path: "{{ image_tarball_local }}"
+      register: tarball_stat
+      delegate_to: localhost
+      run_once: true
+
+    - name: "EXPORT | Display tarball info"
+      debug:
+        msg: "Tarball size: {{ (tarball_stat.stat.size / 1024 / 1024) | round(2) }} MB"
+      run_once: true
+
+    # =========================================================================
+    # Phase 3: Distribute to All Nodes
+    # =========================================================================
+    - name: "DISTRIBUTE | Copy tarball to nodes"
+      copy:
+        src: "{{ image_tarball_local }}"
+        dest: "{{ image_tarball_remote }}"
+      become: true
+
+    - name: "LOAD | Check if Docker is available"
+      command: docker --version
+      register: docker_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: "LOAD | Load image via Docker"
+      command: docker load -i {{ image_tarball_remote }}
+      become: true
+      when: docker_check.rc == 0
+
+    - name: "LOAD | Remove old image from K3s containerd"
+      command: k3s ctr images rm docker.io/library/{{ image_full }}
+      become: true
+      ignore_errors: true
+      changed_when: false
+
+    - name: "LOAD | Import image into K3s containerd"
+      command: k3s ctr images import {{ image_tarball_remote }}
+      become: true
+      register: k3s_import
+
+    - name: "LOAD | Display import result"
+      debug:
+        msg: "{{ k3s_import.stdout }}"
+      when: k3s_import is defined
+
+    # =========================================================================
+    # Phase 4: Verify
+    # =========================================================================
+    - name: "VERIFY | Check image loaded (Docker)"
+      command: docker images {{ image_full }} --format "{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}"
+      register: docker_images
+      become: true
+      when: docker_check.rc == 0
+      changed_when: false
+
+    - name: "VERIFY | Display loaded images"
+      debug:
+        msg: "Image on {{ inventory_hostname }}: {{ docker_images.stdout | default('loaded via containerd') }}"
+
+    # =========================================================================
+    # Phase 5: Cleanup
+    # =========================================================================
+    - name: "CLEANUP | Remove tarball from nodes"
+      file:
+        path: "{{ image_tarball_remote }}"
+        state: absent
+      become: true
+
+    - name: "CLEANUP | Remove local tarball"
+      file:
+        path: "{{ image_tarball_local }}"
+        state: absent
+      delegate_to: localhost
+      run_once: true
+      when: cleanup_local | default(false)

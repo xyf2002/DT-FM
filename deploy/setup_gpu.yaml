@@ -1,0 +1,145 @@
+---
+# Setup GPU support for K3s cluster
+# Installs nvidia-container-toolkit and configures containerd
+- name: Setup GPU support for K3s
+  hosts: cluster
+  become: true
+  vars_files:
+    - secrets.yml
+  vars:
+    containerd_config_dir: /var/lib/rancher/k3s/agent/etc/containerd
+
+  tasks:
+    - name: Check if NVIDIA driver is available
+      command: nvidia-smi -L
+      register: nvidia_check
+      changed_when: false
+      failed_when: false
+
+    - name: Display NVIDIA GPU info
+      debug:
+        msg: "{{ nvidia_check.stdout }}"
+      when: nvidia_check.rc == 0
+
+    - name: Skip if no NVIDIA GPU
+      meta: end_host
+      when: nvidia_check.rc != 0
+
+    - name: Add NVIDIA container toolkit GPG key
+      ansible.builtin.apt_key:
+        url: https://nvidia.github.io/libnvidia-container/gpgkey
+        state: present
+
+    - name: Get distribution
+      command: bash -c '. /etc/os-release && echo $ID$VERSION_ID'
+      register: distro
+      changed_when: false
+
+    - name: Add NVIDIA container toolkit repository
+      ansible.builtin.apt_repository:
+        repo: "deb https://nvidia.github.io/libnvidia-container/stable/deb/$(ARCH) /"
+        filename: nvidia-container-toolkit
+        state: present
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install nvidia-container-toolkit
+      apt:
+        name: nvidia-container-toolkit
+        state: present
+
+    - name: Create containerd config directory
+      file:
+        path: "{{ containerd_config_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Deploy containerd config template for nvidia runtime
+      copy:
+        src: containerd-nvidia.toml.tmpl
+        dest: "{{ containerd_config_dir }}/config.toml.tmpl"
+        mode: '0644'
+
+    - name: Restart k3s service (server)
+      systemd:
+        name: k3s
+        state: restarted
+      when: "'master' in group_names"
+      ignore_errors: true
+
+    - name: Restart k3s-agent service (workers)
+      systemd:
+        name: k3s-agent
+        state: restarted
+      when: "'workers' in group_names"
+      ignore_errors: true
+
+    - name: Wait for k3s to be ready
+      pause:
+        seconds: 10
+
+- name: Install NVIDIA device plugin
+  hosts: localhost
+  gather_facts: true
+  vars:
+    kubeconfig: "{{ ansible_env.HOME }}/.kube/config"
+
+  tasks:
+    - name: Wait for nodes to be ready
+      command: kubectl get nodes
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: nodes_ready
+      until: "'NotReady' not in nodes_ready.stdout"
+      retries: 12
+      delay: 10
+      changed_when: false
+
+    - name: Deploy NVIDIA device plugin
+      command: >
+        kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.1/nvidia-device-plugin.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: device_plugin
+
+    - name: Display device plugin result
+      debug:
+        var: device_plugin.stdout_lines
+
+    - name: Wait for device plugin to be ready
+      command: >
+        kubectl wait --for=condition=Ready pod
+        -l name=nvidia-device-plugin-ds
+        -n kube-system
+        --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: plugin_wait
+      ignore_errors: true
+
+    - name: Check device plugin pods
+      command: kubectl get pods -n kube-system -l name=nvidia-device-plugin-ds -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: plugin_pods
+
+    - name: Display device plugin pods
+      debug:
+        var: plugin_pods.stdout_lines
+
+    - name: Wait for GPU resources to be advertised
+      pause:
+        seconds: 30
+
+    - name: Verify GPU resources on nodes
+      shell: |
+        kubectl get nodes -o custom-columns=NAME:.metadata.name,GPU:.status.allocatable."nvidia\.com/gpu"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: gpu_resources
+
+    - name: Display GPU resources
+      debug:
+        var: gpu_resources.stdout_lines

@@ -1,0 +1,102 @@
+Using /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/ansible.cfg as config file
+
+PLAY [Asteroid Full Cluster Deployment] ****************************************
+
+TASK [Gathering Facts] *********************************************************
+ok: [localhost]
+
+TASK [BOOTSTRAP | Check if bootstrap needed] ***********************************
+ok: [localhost -> master_node(10.203.54.10)] => {"changed": false, "stat": {"atime": 1772331853.7362015, "attr_flags": "", "attributes": [], "block_size": 4096, "blocks": 0, "charset": "binary", "ctime": 1772331826.4285846, "dev": 2050, "device_type": 0, "executable": true, "exists": true, "gid": 0, "gr_name": "root", "inode": 1708459, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": true, "isreg": false, "issock": false, "isuid": false, "lnk_source": "/usr/bin/python3.12", "lnk_target": "python3", "mimetype": "inode/symlink", "mode": "0777", "mtime": 1772331826.4285846, "nlink": 1, "path": "/opt/asteroid/venv/bin/python", "pw_name": "root", "readable": true, "rgrp": true, "roth": true, "rusr": true, "size": 7, "uid": 0, "version": null, "wgrp": true, "woth": true, "writeable": true, "wusr": true, "xgrp": true, "xoth": true, "xusr": true}}
+
+TASK [BOOTSTRAP | Run bootstrap playbook] **************************************
+skipping: [localhost] => {"changed": false, "false_condition": "not venv_check.stat.exists | default(true)", "skip_reason": "Conditional result was False"}
+
+TASK [PROFILE | Check for existing profiles] ***********************************
+ok: [localhost] => {"changed": false, "examined": 3, "files": [{"atime": 1772384047.2363207, "ctime": 1772384047.2361991, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1441895, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772384047.2361991, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/profiles/profile_ubuntu-2404-desktop-template_rank0.json", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 6438, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}, {"atime": 1772384047.3931875, "ctime": 1772384047.393047, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1441973, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772384047.393047, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/profiles/profile_ubuntu-2404-desktop-template_rank2.json", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 6426, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}, {"atime": 1772384047.871247, "ctime": 1772384047.8711383, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1441978, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772384047.8711383, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/profiles/profile_ubuntu_rank1.json", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 6394, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}], "matched": 3, "msg": "All paths examined", "skipped_paths": {}}
+
+TASK [PROFILE | Display existing profiles] *************************************
+ok: [localhost] => {
+    "msg": "Found 3 existing profile(s)"
+}
+
+TASK [PROFILE | Run profiling playbook] ****************************************
+skipping: [localhost] => {"changed": false, "false_condition": "existing_profiles.matched == 0", "skip_reason": "Conditional result was False"}
+
+TASK [PROFILE | Verify profiles gathered] **************************************
+ok: [localhost] => {"changed": false, "examined": 3, "files": [{"atime": 1772384047.2363207, "ctime": 1772384047.2361991, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1441895, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772384047.2361991, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/profiles/profile_ubuntu-2404-desktop-template_rank0.json", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 6438, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}, {"atime": 1772384047.3931875, "ctime": 1772384047.393047, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1441973, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772384047.393047, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/profiles/profile_ubuntu-2404-desktop-template_rank2.json", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 6426, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}, {"atime": 1772384047.871247, "ctime": 1772384047.8711383, "dev": 2050, "gid": 1000, "gr_name": "ubuntu", "inode": 1441978, "isblk": false, "ischr": false, "isdir": false, "isfifo": false, "isgid": false, "islnk": false, "isreg": true, "issock": false, "isuid": false, "mode": "0664", "mtime": 1772384047.8711383, "nlink": 1, "path": "/home/ubuntu/Desktop/dheeraj/asteroid_project/profiles/profile_ubuntu_rank1.json", "pw_name": "ubuntu", "rgrp": true, "roth": true, "rusr": true, "size": 6394, "uid": 1000, "wgrp": true, "woth": false, "wusr": true, "xgrp": false, "xoth": false, "xusr": false}], "matched": 3, "msg": "All paths examined", "skipped_paths": {}}
+
+TASK [PROFILE | Assert profiles exist] *****************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "Found 3 profile(s)"
+}
+
+TASK [PLAN | Run planner] ******************************************************
+changed: [localhost] => {"changed": true, "cmd": ["/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../.venv/bin/python", "run_planner.py", "--profiles-dir", "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../profiles", "--cluster-conf", "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../cluster.conf", "--output", "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json", "--num-stages", "2", "--num-layers", "12"], "delta": "0:00:02.200978", "end": "2026-03-01 18:35:28.848896", "msg": "", "rc": 0, "start": "2026-03-01 18:35:26.647918", "stderr": "2026-03-01 18:35:28,445 | Asteroid | INFO | Planner: 3 stages, partition=[4, 8], latency=794.6ms", "stderr_lines": ["2026-03-01 18:35:28,445 | Asteroid | INFO | Planner: 3 stages, partition=[4, 8], latency=794.6ms"], "stdout": "============================================================\nASTEROID HPP PLANNER\n============================================================\n\nLoading cluster configuration from /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../cluster.conf\n  Found 3 nodes in cluster.conf\n\nLoading profiles from /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../profiles\n  Loaded: profile_ubuntu-2404-desktop-template_rank0.json (hostname: ubuntu-2404-desktop-template, rank: 0)\n  Loaded: profile_ubuntu-2404-desktop-template_rank2.json (hostname: ubuntu-2404-desktop-template, rank: 2)\n  Loaded: profile_ubuntu_rank1.json (hostname: ubuntu, rank: 1)\n  Loaded 3 profile files\n\nMatching profiles to cluster nodes...\n  Rank 0: ubuntu-2404-desktop-template -> 10.203.54.10\n  Rank 1: ubuntu -> 10.203.53.10\n  Rank 2: ubuntu-2404-desktop-template -> 10.203.56.10\n\nBuilding profiler data...\n  Device specs: 3\n  Exec times loaded: 180\n  Bandwidth measurements: 4\n\nRunning DP planner (stages=2, layers=12)...\n\n============================================================\nHPP PLAN GENERATED\n============================================================\nOutput: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json\nStages: 3\nPartition points: [4, 8]\nDevice groups:\n  Stage 0: devices [0]\n  Stage 1: devices [1]\n  Stage 2: devices [2]\nEstimated latency: 794.55 ms\nWorld size: 3\n============================================================", "stdout_lines": ["============================================================", "ASTEROID HPP PLANNER", "============================================================", "", "Loading cluster configuration from /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../cluster.conf", "  Found 3 nodes in cluster.conf", "", "Loading profiles from /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../profiles", "  Loaded: profile_ubuntu-2404-desktop-template_rank0.json (hostname: ubuntu-2404-desktop-template, rank: 0)", "  Loaded: profile_ubuntu-2404-desktop-template_rank2.json (hostname: ubuntu-2404-desktop-template, rank: 2)", "  Loaded: profile_ubuntu_rank1.json (hostname: ubuntu, rank: 1)", "  Loaded 3 profile files", "", "Matching profiles to cluster nodes...", "  Rank 0: ubuntu-2404-desktop-template -> 10.203.54.10", "  Rank 1: ubuntu -> 10.203.53.10", "  Rank 2: ubuntu-2404-desktop-template -> 10.203.56.10", "", "Building profiler data...", "  Device specs: 3", "  Exec times loaded: 180", "  Bandwidth measurements: 4", "", "Running DP planner (stages=2, layers=12)...", "", "============================================================", "HPP PLAN GENERATED", "============================================================", "Output: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json", "Stages: 3", "Partition points: [4, 8]", "Device groups:", "  Stage 0: devices [0]", "  Stage 1: devices [1]", "  Stage 2: devices [2]", "Estimated latency: 794.55 ms", "World size: 3", "============================================================"]}
+
+TASK [PLAN | Display planner output] *******************************************
+ok: [localhost] => {
+    "planner_output.stdout_lines": [
+        "============================================================",
+        "ASTEROID HPP PLANNER",
+        "============================================================",
+        "",
+        "Loading cluster configuration from /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../cluster.conf",
+        "  Found 3 nodes in cluster.conf",
+        "",
+        "Loading profiles from /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../profiles",
+        "  Loaded: profile_ubuntu-2404-desktop-template_rank0.json (hostname: ubuntu-2404-desktop-template, rank: 0)",
+        "  Loaded: profile_ubuntu-2404-desktop-template_rank2.json (hostname: ubuntu-2404-desktop-template, rank: 2)",
+        "  Loaded: profile_ubuntu_rank1.json (hostname: ubuntu, rank: 1)",
+        "  Loaded 3 profile files",
+        "",
+        "Matching profiles to cluster nodes...",
+        "  Rank 0: ubuntu-2404-desktop-template -> 10.203.54.10",
+        "  Rank 1: ubuntu -> 10.203.53.10",
+        "  Rank 2: ubuntu-2404-desktop-template -> 10.203.56.10",
+        "",
+        "Building profiler data...",
+        "  Device specs: 3",
+        "  Exec times loaded: 180",
+        "  Bandwidth measurements: 4",
+        "",
+        "Running DP planner (stages=2, layers=12)...",
+        "",
+        "============================================================",
+        "HPP PLAN GENERATED",
+        "============================================================",
+        "Output: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json",
+        "Stages: 3",
+        "Partition points: [4, 8]",
+        "Device groups:",
+        "  Stage 0: devices [0]",
+        "  Stage 1: devices [1]",
+        "  Stage 2: devices [2]",
+        "Estimated latency: 794.55 ms",
+        "World size: 3",
+        "============================================================"
+    ]
+}
+
+TASK [PLAN | Load generated plan] **********************************************
+ok: [localhost] => {"changed": false, "content": "ewogICJudW1fc3RhZ2VzIjogMywKICAicGFydGl0aW9uX3BvaW50cyI6IFsKICAgIDQsCiAgICA4CiAgXSwKICAiZGV2aWNlX2dyb3VwcyI6IHsKICAgICIwIjogWwogICAgICAwCiAgICBdLAogICAgIjEiOiBbCiAgICAgIDEKICAgIF0sCiAgICAiMiI6IFsKICAgICAgMgogICAgXQogIH0sCiAgIm1pY3JvX2JhdGNoX2FsbG9jIjogewogICAgIjAiOiB7CiAgICAgICIwIjogNAogICAgfSwKICAgICIxIjogewogICAgICAiMSI6IDQKICAgIH0sCiAgICAiMiI6IHsKICAgICAgIjIiOiA0CiAgICB9CiAgfSwKICAiZG9taW5hbnRfc3RlcCI6IDAsCiAgImVzdGltYXRlZF9sYXRlbmN5X21zIjogNzk0LjU1MjE2MjE4NDUyNjMsCiAgIm5vZGVfbWFwcGluZyI6IHsKICAgICIwIjogewogICAgICAiaG9zdG5hbWUiOiAidWJ1bnR1LTI0MDQtZGVza3RvcC10ZW1wbGF0ZSIsCiAgICAgICJpcCI6ICIxMC4yMDMuNTQuMTAiLAogICAgICAibmljIjogImVuczMzIiwKICAgICAgImdwdV9pZCI6IDAsCiAgICAgICJtZW1vcnlfbWIiOiA0NTQ1OSwKICAgICAgImFyY2hpdGVjdHVyZSI6ICJ4ODZfNjQiCiAgICB9LAogICAgIjEiOiB7CiAgICAgICJob3N0bmFtZSI6ICJ1YnVudHUiLAogICAgICAiaXAiOiAiMTAuMjAzLjUzLjEwIiwKICAgICAgIm5pYyI6ICJlbnMzMyIsCiAgICAgICJncHVfaWQiOiAwLAogICAgICAibWVtb3J5X21iIjogNDU0NTksCiAgICAgICJhcmNoaXRlY3R1cmUiOiAieDg2XzY0IgogICAgfSwKICAgICIyIjogewogICAgICAiaG9zdG5hbWUiOiAidWJ1bnR1LTI0MDQtZGVza3RvcC10ZW1wbGF0ZSIsCiAgICAgICJpcCI6ICIxMC4yMDMuNTYuMTAiLAogICAgICAibmljIjogImVuczMzIiwKICAgICAgImdwdV9pZCI6IDAsCiAgICAgICJtZW1vcnlfbWIiOiA0NTQ1OSwKICAgICAgImFyY2hpdGVjdHVyZSI6ICJ4ODZfNjQiCiAgICB9CiAgfSwKICAid29ybGRfc2l6ZSI6IDMKfQ==", "encoding": "base64", "source": "/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../hpp_plan.json"}
+
+TASK [PLAN | Display plan summary] *********************************************
+ok: [localhost] => {
+    "msg": "HPP Plan Generated:\n- Stages: 3\n- World Size: 3\n- Partition: [4, 8]\n"
+}
+
+TASK [IMAGE | Build and distribute image] **************************************
+[ERROR]: Task failed: Module failed: non-zero return code
+Origin: /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/setup_cluster.yml:147:7
+
+145     # Phase 3: Build and Distribute Docker Image
+146     # =========================================================================
+147     - name: "IMAGE | Build and distribute image"
+          ^ column 7
+
+fatal: [localhost]: FAILED! => {"changed": true, "cmd": ["/home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/../.venv/bin/ansible-playbook", "-i", "inventory.ini", "distribute_image.yaml", "-v", "-e", "image_tag=latest"], "delta": "0:00:00.479425", "end": "2026-03-01 18:35:30.487866", "msg": "non-zero return code", "rc": 1, "start": "2026-03-01 18:35:30.008441", "stderr": "[WARNING]: Error getting vault password file (default): The vault password file /root/.asteroid_vault_pass was not found\n[ERROR]: The vault password file /root/.asteroid_vault_pass was not found", "stderr_lines": ["[WARNING]: Error getting vault password file (default): The vault password file /root/.asteroid_vault_pass was not found", "[ERROR]: The vault password file /root/.asteroid_vault_pass was not found"], "stdout": "Using /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/ansible.cfg as config file", "stdout_lines": ["Using /home/ubuntu/Desktop/dheeraj/asteroid_project/deploy/ansible.cfg as config file"]}
+
+PLAY RECAP *********************************************************************
+localhost                  : ok=10   changed=1    unreachable=0    failed=1    skipped=2    rescued=0    ignored=0   
+

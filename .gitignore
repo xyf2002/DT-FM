@@ -1,0 +1,50 @@
+# Python
+*.pyc
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Asteroid specific
+profiles/
+hpp_plan.json
+deploy/generated/
+deploy/secrets.yml
+asteroid_output/
+checkpoints/
+*.tar
+
+# Docker
+asteroid_image.tar
+
+# Ansible
+*.retry
+.ansible/
+
+# HuggingFace cache
+.cache/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db

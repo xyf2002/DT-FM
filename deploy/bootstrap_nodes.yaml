@@ -1,0 +1,317 @@
+---
+# ============================================================================
+# Asteroid Bootstrap Playbook
+# ============================================================================
+# Bootstraps edge cluster nodes with correct Python/CUDA environment.
+# Automatically detects hardware architecture (x86_64 vs ARM64 Jetson)
+# and installs appropriate PyTorch/CuPy wheels.
+#
+# Usage:
+#   ansible-playbook bootstrap_nodes.yaml -v
+#
+# Prerequisites:
+#   - Create ~/.asteroid_vault_pass with your vault password
+#   - Create secrets.yml with ansible_ssh_pass and ansible_become_pass
+#   - Update inventory.ini with your cluster nodes
+
+- name: Bootstrap Asteroid Edge Cluster
+  hosts: cluster
+  gather_facts: true
+  vars_files:
+    - secrets.yml
+    - vars/pytorch_sources.yml
+  vars:
+    asteroid_home: /opt/asteroid
+    asteroid_venv: "{{ asteroid_home }}/venv"
+    asteroid_cache: "{{ asteroid_home }}/.cache"
+
+  tasks:
+    # =========================================================================
+    # PHASE 1: Hardware Detection
+    # =========================================================================
+    - name: "DETECT | System architecture"
+      set_fact:
+        node_arch: "{{ ansible_architecture }}"
+        is_x86_64: "{{ ansible_architecture == 'x86_64' }}"
+        is_arm64: "{{ ansible_architecture in ['aarch64', 'arm64'] }}"
+
+    - name: "DETECT | Check for NVIDIA GPU"
+      command: nvidia-smi --query-gpu=driver_version --format=csv,noheader
+      register: nvidia_driver_raw
+      ignore_errors: true
+      changed_when: false
+
+    - name: "DETECT | GPU availability"
+      set_fact:
+        has_gpu: "{{ nvidia_driver_raw.rc == 0 }}"
+        nvidia_driver: "{{ nvidia_driver_raw.stdout | default('0') | trim }}"
+
+    - name: "DETECT | CUDA version from driver"
+      set_fact:
+        # Driver 525+ = CUDA 12.x, 450-524 = CUDA 11.x, older = CUDA 10.x
+        cuda_major: >-
+          {{ 12 if (nvidia_driver | float) >= 525.0 
+             else (11 if (nvidia_driver | float) >= 450.0 
+             else (10 if (nvidia_driver | float) >= 410.0 
+             else 0)) }}
+      when: has_gpu
+
+    - name: "DETECT | CUDA version (no GPU)"
+      set_fact:
+        cuda_major: 0
+      when: not has_gpu
+
+    - name: "DETECT | JetPack version (ARM64 only)"
+      shell: |
+        if [ -f /etc/nv_tegra_release ]; then
+          cat /etc/nv_tegra_release | grep -oP 'R\K[0-9]+' | head -1
+        else
+          echo "0"
+        fi
+      register: jetpack_raw
+      when: is_arm64
+      changed_when: false
+
+    - name: "DETECT | Set JetPack version fact"
+      set_fact:
+        jetpack_major: "{{ jetpack_raw.stdout | default('0') | trim }}"
+      when: is_arm64
+
+    - name: "DETECT | JetPack version (x86_64)"
+      set_fact:
+        jetpack_major: "0"
+      when: is_x86_64
+
+    - name: "DETECT | Display detected hardware"
+      debug:
+        msg: |
+          === Hardware Detection Results ===
+          Hostname: {{ inventory_hostname }}
+          Architecture: {{ node_arch }}
+          Has GPU: {{ has_gpu }}
+          NVIDIA Driver: {{ nvidia_driver }}
+          CUDA Major: {{ cuda_major }}
+          JetPack Major: {{ jetpack_major }}
+          ==================================
+
+    # =========================================================================
+    # PHASE 2: System Packages
+    # =========================================================================
+    - name: "APT | Update cache"
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      become: true
+
+    - name: "APT | Install system prerequisites"
+      apt:
+        name:
+          - python3-venv
+          - python3-pip
+          - python3-dev
+          - build-essential
+          - iperf3
+          - curl
+          - git
+          - sshpass
+          - net-tools
+          - htop
+        state: present
+      become: true
+
+    # =========================================================================
+    # PHASE 3: Python Virtual Environment
+    # =========================================================================
+    - name: "VENV | Create Asteroid home directory"
+      file:
+        path: "{{ asteroid_home }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+      become: true
+
+    - name: "VENV | Create cache directory"
+      file:
+        path: "{{ asteroid_cache }}/huggingface"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+      become: true
+
+    - name: "VENV | Create Python virtual environment"
+      command: python3 -m venv {{ asteroid_venv }}
+      args:
+        creates: "{{ asteroid_venv }}/bin/python"
+      become: true
+
+    - name: "VENV | Fix ownership"
+      file:
+        path: "{{ asteroid_venv }}"
+        state: directory
+        recurse: yes
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+      become: true
+
+    - name: "VENV | Upgrade pip, setuptools, wheel"
+      pip:
+        name:
+          - pip
+          - setuptools
+          - wheel
+        state: latest
+        virtualenv: "{{ asteroid_venv }}"
+      become: true
+
+    # =========================================================================
+    # PHASE 4: PyTorch Installation (Conditional)
+    # =========================================================================
+    
+    # --- x86_64 with CUDA 12.x ---
+    - name: "PYTORCH | Install (x86_64 + CUDA 12.x)"
+      pip:
+        name: torch
+        extra_args: --index-url {{ pytorch_cu124_index }}
+        virtualenv: "{{ asteroid_venv }}"
+      when: is_x86_64 and (cuda_major | int) >= 12
+      become: true
+
+    # --- x86_64 with CUDA 11.x ---
+    - name: "PYTORCH | Install (x86_64 + CUDA 11.x)"
+      pip:
+        name: torch
+        extra_args: --index-url {{ pytorch_cu118_index }}
+        virtualenv: "{{ asteroid_venv }}"
+      when: is_x86_64 and (cuda_major | int) == 11
+      become: true
+
+    # --- x86_64 without GPU ---
+    - name: "PYTORCH | Install (x86_64 + CPU only)"
+      pip:
+        name: torch
+        extra_args: --index-url {{ pytorch_cpu_index }}
+        virtualenv: "{{ asteroid_venv }}"
+      when: is_x86_64 and (cuda_major | int) == 0
+      become: true
+
+    # --- ARM64 Jetson JetPack 4.6 (R32.x) ---
+    - name: "PYTORCH | Install (ARM64 JetPack 4.6)"
+      pip:
+        name: "{{ pytorch_l4t_jp46_url }}"
+        virtualenv: "{{ asteroid_venv }}"
+      when: is_arm64 and (jetpack_major | int) >= 32 and (jetpack_major | int) < 35
+      become: true
+      ignore_errors: true
+
+    # --- ARM64 Jetson JetPack 5.x (R35.x) ---
+    - name: "PYTORCH | Install (ARM64 JetPack 5.x)"
+      pip:
+        name: "{{ pytorch_l4t_jp5_url }}"
+        virtualenv: "{{ asteroid_venv }}"
+      when: is_arm64 and (jetpack_major | int) >= 35 and (jetpack_major | int) < 36
+      become: true
+      ignore_errors: true
+
+    # --- ARM64 Jetson JetPack 6.x (R36.x) ---
+    - name: "PYTORCH | Install (ARM64 JetPack 6.x)"
+      pip:
+        name: "{{ pytorch_l4t_jp6_url }}"
+        virtualenv: "{{ asteroid_venv }}"
+      when: is_arm64 and (jetpack_major | int) >= 36
+      become: true
+      ignore_errors: true
+
+    # =========================================================================
+    # PHASE 5: CuPy Installation (Conditional)
+    # =========================================================================
+    - name: "CUPY | Install (CUDA 12.x)"
+      pip:
+        name: "{{ cupy_cuda12 }}"
+        virtualenv: "{{ asteroid_venv }}"
+      when: (cuda_major | int) >= 12
+      become: true
+      ignore_errors: true
+
+    - name: "CUPY | Install (CUDA 11.x)"
+      pip:
+        name: "{{ cupy_cuda11 }}"
+        virtualenv: "{{ asteroid_venv }}"
+      when: (cuda_major | int) == 11
+      become: true
+      ignore_errors: true
+
+    # =========================================================================
+    # PHASE 6: Other Python Dependencies
+    # =========================================================================
+    - name: "PIP | Install common dependencies"
+      pip:
+        name: "{{ common_pip_packages }}"
+        virtualenv: "{{ asteroid_venv }}"
+      become: true
+
+    # =========================================================================
+    # PHASE 7: K3s & NVIDIA Runtime Verification
+    # =========================================================================
+    - name: "K3S | Check agent status"
+      systemd:
+        name: k3s-agent
+        state: started
+      become: true
+      ignore_errors: true
+      register: k3s_agent_status
+
+    - name: "K3S | Check server status (master only)"
+      systemd:
+        name: k3s
+        state: started
+      become: true
+      ignore_errors: true
+      register: k3s_server_status
+      when: "'master' in group_names"
+
+    - name: "NVIDIA | Verify nvidia-smi"
+      command: nvidia-smi
+      register: nvidia_smi_check
+      ignore_errors: true
+      changed_when: false
+      when: has_gpu
+
+    - name: "NVIDIA | Check container toolkit"
+      command: nvidia-container-cli --version
+      register: nvidia_container_check
+      ignore_errors: true
+      changed_when: false
+      when: has_gpu
+
+    # =========================================================================
+    # PHASE 8: Verification
+    # =========================================================================
+    - name: "VERIFY | Test PyTorch import"
+      command: "{{ asteroid_venv }}/bin/python -c 'import torch; print(f\"PyTorch {torch.__version__}\")'"
+      register: pytorch_test
+      changed_when: false
+
+    - name: "VERIFY | Test CUDA availability"
+      command: >
+        {{ asteroid_venv }}/bin/python -c 
+        "import torch; print(f'CUDA: {torch.cuda.is_available()}, Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else None}')"
+      register: cuda_test
+      changed_when: false
+      ignore_errors: true
+
+    - name: "VERIFY | Display bootstrap summary"
+      debug:
+        msg: |
+          ========================================
+          BOOTSTRAP COMPLETE: {{ inventory_hostname }}
+          ========================================
+          Architecture: {{ node_arch }}
+          CUDA Major: {{ cuda_major }}
+          PyTorch: {{ pytorch_test.stdout }}
+          CUDA Test: {{ cuda_test.stdout | default('N/A') }}
+          K3s Agent: {{ 'Running' if k3s_agent_status is succeeded else 'Not Running/Not Installed' }}
+          NVIDIA SMI: {{ 'OK' if (nvidia_smi_check is defined and nvidia_smi_check.rc == 0) else 'N/A' }}
+          Venv Path: {{ asteroid_venv }}
+          ========================================

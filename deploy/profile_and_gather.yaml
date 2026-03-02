@@ -1,0 +1,367 @@
+---
+# ============================================================================
+# Asteroid Profiling and Data Gathering Playbook
+# ============================================================================
+# Syncs codebase to all nodes, executes profile_node.py, and gathers results.
+#
+# Usage:
+#   ansible-playbook profile_and_gather.yaml -v
+#
+# Prerequisites:
+#   - Run bootstrap_nodes.yaml first to setup environments
+#   - Download HuggingFace dataset cache on master first:
+#     python -c "from datasets import load_dataset; load_dataset('glue', 'sst2')"
+#
+# Output:
+#   - Profile JSON files gathered to ./profiles/ directory
+
+- name: Asteroid Cluster Profiling and Data Sync
+  hosts: cluster
+  gather_facts: true
+  vars_files:
+    - secrets.yml
+  vars:
+    # Paths
+    asteroid_local_src: "{{ playbook_dir }}/.."
+    asteroid_remote_src: /opt/asteroid/src
+    asteroid_remote_profiles: /opt/asteroid/profiles
+    profiles_local_dir: "{{ playbook_dir }}/../profiles"
+    venv_python: /opt/asteroid/venv/bin/python
+    
+    # Temp bundle paths (no rsync needed)
+    local_bundle_path: /tmp/asteroid_src.tar.gz
+    remote_bundle_path: /tmp/asteroid_src.tar.gz
+    
+    # HuggingFace cache
+    hf_cache_local: "{{ lookup('env', 'HOME') }}/.cache/huggingface"
+    hf_cache_remote: /opt/asteroid/.cache/huggingface
+    hf_bundle_local: /tmp/hf_cache.tar.gz
+    hf_bundle_remote: /tmp/hf_cache.tar.gz
+    
+    # Profiling configuration
+    profile_num_layers: 12
+    profile_embed_dim: 768
+    profile_batch_sizes: "1,2,4,8,16"
+    profile_seq_len: 128
+    
+    # Build peer list dynamically from inventory (exclude self)
+    network_peers: >-
+      {{ groups['cluster'] 
+         | map('extract', hostvars, 'ansible_host') 
+         | default(groups['cluster']) 
+         | reject('equalto', inventory_hostname)
+         | reject('equalto', ansible_host | default(inventory_hostname))
+         | map('regex_replace', '$', ':5201') 
+         | join(',') }}
+
+  tasks:
+    # =========================================================================
+    # PHASE 1: Sync Codebase to All Nodes (no rsync - password compatible)
+    # =========================================================================
+    - name: "SYNC | Create source directory"
+      ansible.builtin.file:
+        path: "{{ asteroid_remote_src }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+      become: true
+
+    - name: "SYNC | Create source bundle on control node"
+      ansible.builtin.shell: |
+        cd "{{ asteroid_local_src }}" && \
+        tar --exclude='.git' \
+            --exclude='.venv' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='profiles' \
+            --exclude='deploy/generated' \
+            --exclude='*.egg-info' \
+            --exclude='hpp_plan.json' \
+            -czf "{{ local_bundle_path }}" .
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: "SYNC | Upload source bundle to nodes"
+      ansible.builtin.copy:
+        src: "{{ local_bundle_path }}"
+        dest: "{{ remote_bundle_path }}"
+        mode: '0644'
+
+    - name: "SYNC | Extract source bundle on nodes"
+      ansible.builtin.shell: |
+        rm -rf "{{ asteroid_remote_src }}"/* && \
+        tar -xzf "{{ remote_bundle_path }}" -C "{{ asteroid_remote_src }}"
+      become: true
+
+    - name: "SYNC | Fix source ownership"
+      ansible.builtin.file:
+        path: "{{ asteroid_remote_src }}"
+        state: directory
+        recurse: yes
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+      become: true
+
+    - name: "SYNC | Cleanup remote bundle"
+      ansible.builtin.file:
+        path: "{{ remote_bundle_path }}"
+        state: absent
+
+    - name: "SYNC | Cleanup local bundle"
+      ansible.builtin.file:
+        path: "{{ local_bundle_path }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: "INSTALL | Ensure python3-venv is installed"
+      ansible.builtin.apt:
+        name:
+          - python3-venv
+          - python3-pip
+        state: present
+      become: true
+
+    - name: "INSTALL | Create venv if not exists"
+      ansible.builtin.command:
+        cmd: python3 -m venv /opt/asteroid/venv
+        creates: /opt/asteroid/venv/bin/python
+      become: true
+
+    - name: "INSTALL | Free disk space (apt & pip caches, temp files)"
+      ansible.builtin.shell: |
+        apt-get clean -y 2>/dev/null || true
+        rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+        rm -rf /tmp/pip-* /tmp/pip_* 2>/dev/null || true
+        /opt/asteroid/venv/bin/pip cache purge 2>/dev/null || true
+        # Remove old venv site-packages if reinstalling (saves space on re-runs)
+      become: true
+      changed_when: true
+
+    - name: "INSTALL | Check available disk space"
+      ansible.builtin.shell: |
+        df -BG --output=avail /opt 2>/dev/null | tail -1 | tr -d ' G'
+      register: disk_space_check
+      changed_when: false
+
+    - name: "INSTALL | Warn if disk space is low (< 10 GB)"
+      ansible.builtin.debug:
+        msg: "WARNING: Only {{ disk_space_check.stdout }}GB available on /opt. PyTorch+CUDA needs ~5GB. Install may fail."
+      when: disk_space_check.stdout | int < 10
+
+    - name: "INSTALL | Upgrade pip and install build tools"
+      ansible.builtin.shell: |
+        /opt/asteroid/venv/bin/pip install --no-cache-dir --upgrade pip setuptools wheel
+      become: true
+
+    - name: "INSTALL | Install asteroid package from pyproject.toml"
+      ansible.builtin.shell: |
+        /opt/asteroid/venv/bin/pip install --no-cache-dir "{{ asteroid_remote_src }}"
+      become: true
+      register: pip_install_result
+      ignore_errors: true
+
+    - name: "INSTALL | Show pip install result"
+      ansible.builtin.debug:
+        var: pip_install_result
+      when: pip_install_result is defined
+
+    # =========================================================================
+    # PHASE 2: Sync HuggingFace Dataset Cache (no rsync - password compatible)
+    # =========================================================================
+    - name: "CACHE | Check if HF cache exists on control node"
+      ansible.builtin.stat:
+        path: "{{ hf_cache_local }}/datasets"
+      register: hf_cache_check
+      delegate_to: localhost
+      run_once: true
+
+    - name: "CACHE | Create HF cache directory"
+      ansible.builtin.file:
+        path: "{{ hf_cache_remote }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+      become: true
+
+    - name: "CACHE | Create HF cache bundle on control node"
+      ansible.builtin.shell: |
+        cd "{{ hf_cache_local }}" && \
+        tar --exclude='*.lock' -czf "{{ hf_bundle_local }}" .
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: hf_cache_check.stat.exists
+      ignore_errors: true
+
+    - name: "CACHE | Upload HF cache bundle to nodes"
+      ansible.builtin.copy:
+        src: "{{ hf_bundle_local }}"
+        dest: "{{ hf_bundle_remote }}"
+        mode: '0644'
+      when: hf_cache_check.stat.exists
+      ignore_errors: true
+
+    - name: "CACHE | Extract HF cache on nodes"
+      ansible.builtin.shell: |
+        tar -xzf "{{ hf_bundle_remote }}" -C "{{ hf_cache_remote }}"
+      become: true
+      when: hf_cache_check.stat.exists
+      ignore_errors: true
+
+    - name: "CACHE | Cleanup HF bundles"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ hf_bundle_remote }}"
+      when: hf_cache_check.stat.exists
+      ignore_errors: true
+
+    - name: "CACHE | Cleanup local HF bundle"
+      ansible.builtin.file:
+        path: "{{ hf_bundle_local }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: hf_cache_check.stat.exists
+      ignore_errors: true
+
+    # =========================================================================
+    # PHASE 3: Setup iperf3 Servers for Network Profiling
+    # =========================================================================
+    - name: "IPERF | Install iperf3 and virtualenv"
+      ansible.builtin.apt:
+        name:
+          - iperf3
+          - python3-venv
+          - python3-pip
+        state: present
+        update_cache: yes
+      become: true
+
+    - name: "IPERF | Copy systemd service file"
+      copy:
+        src: files/iperf_server.service
+        dest: /etc/systemd/system/iperf_server.service
+        mode: '0644'
+      become: true
+
+    - name: "IPERF | Reload systemd daemon"
+      systemd:
+        daemon_reload: yes
+      become: true
+
+    - name: "IPERF | Stop any existing iperf3 service"
+      systemd:
+        name: iperf_server
+        state: stopped
+      become: true
+      ignore_errors: true
+
+    - name: "IPERF | Start iperf3 server"
+      systemd:
+        name: iperf_server
+        state: started
+        enabled: no  # Don't persist across reboots
+      become: true
+
+    - name: "IPERF | Wait for iperf3 to be ready"
+      wait_for:
+        port: 5201
+        timeout: 30
+        state: started
+
+    # =========================================================================
+    # PHASE 4: Execute Profiler
+    # =========================================================================
+    - name: "PROFILE | Create profiles directory"
+      file:
+        path: "{{ asteroid_remote_profiles }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+      become: true
+
+    - name: "PROFILE | Run profile_node.py"
+      command: >
+        {{ venv_python }} {{ asteroid_remote_src }}/profile_node.py
+        --output-dir {{ asteroid_remote_profiles }}
+        --rank {{ ansible_play_hosts_all.index(inventory_hostname) }}
+        --num-layers {{ profile_num_layers }}
+        --embed-dim {{ profile_embed_dim }}
+        --batch-sizes "{{ profile_batch_sizes }}"
+        --seq-len {{ profile_seq_len }}
+        --network-peers "{{ network_peers }}"
+      environment:
+        HF_HOME: "{{ hf_cache_remote }}"
+        CUDA_VISIBLE_DEVICES: "{{ gpu_id | default('0') }}"
+      register: profile_result
+      become: true
+      become_user: "{{ ansible_user }}"
+
+    - name: "PROFILE | Display profiling output"
+      debug:
+        msg: "{{ profile_result.stdout_lines[-20:] }}"
+      when: profile_result.stdout_lines | length > 0
+
+    # =========================================================================
+    # PHASE 5: Gather Profiles to Master
+    # =========================================================================
+    - name: "GATHER | Ensure local profiles directory exists"
+      file:
+        path: "{{ profiles_local_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+
+    - name: "GATHER | Find profile files"
+      find:
+        paths: "{{ asteroid_remote_profiles }}"
+        patterns: "profile_*.json"
+      register: profile_files
+
+    - name: "GATHER | Fetch profile JSON to master"
+      fetch:
+        src: "{{ item.path }}"
+        dest: "{{ profiles_local_dir }}/"
+        flat: yes
+      loop: "{{ profile_files.files }}"
+      when: profile_files.matched > 0
+
+    # =========================================================================
+    # PHASE 6: Cleanup
+    # =========================================================================
+    - name: "CLEANUP | Stop iperf3 server"
+      systemd:
+        name: iperf_server
+        state: stopped
+      become: true
+      ignore_errors: true
+
+    # =========================================================================
+    # Summary
+    # =========================================================================
+    - name: "SUMMARY | List gathered profiles"
+      find:
+        paths: "{{ profiles_local_dir }}"
+        patterns: "profile_*.json"
+      register: gathered_profiles
+      delegate_to: localhost
+      run_once: true
+
+    - name: "SUMMARY | Display results"
+      debug:
+        msg: |
+          ========================================
+          PROFILING COMPLETE
+          ========================================
+          Profiles gathered: {{ gathered_profiles.matched }}
+          Location: {{ profiles_local_dir }}
+          Files: {{ gathered_profiles.files | map(attribute='path') | map('basename') | list }}
+          ========================================
+      run_once: true
