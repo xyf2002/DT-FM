@@ -1,0 +1,477 @@
+*.pdf
+*.csv
+*.txt
+*.png
+*.nsys-rep
+*.ncu-rep
+*.sqlite
+node_modules
+.taskmaster
+.vscode
+.claude
+.opencode
+
+# CMake-generated files
+.ninja_deps
+.ninja_logs
+cmake/protobuf/*.cmake
+cmake_install.cmake
+CMakeCache.txt
+CTestTestfile.cmake
+CMakeFiles/*
+Testing/Temporary/*
+
+/core
+/protoc
+/test_plugin
+# /tests
+/lite-test
+/protoc-*.*
+
+# downloaded files
+/gmock
+
+# in-tree configure-generated files
+/config.h
+config.log
+config.status
+
+libtool
+protobuf-lite.pc
+protobuf.pc
+.deps
+stamp-h1
+
+# in-tree build products
+*.o
+*.lo
+*.la
+*.so
+*.a
+
+.dirstamp
+
+any_test.pb.*
+map*unittest.pb.*
+unittest*.pb.*
+src/google/protobuf/compiler/cpp/test*.pb.*
+src/google/protobuf/util/**/*.pb.cc
+src/google/protobuf/util/**/*.pb.h
+
+*.pyc
+*.egg-info
+*_pb2.py
+*_pb2_grpc.py
+python/**/*.egg
+python/.eggs/
+python/.tox
+python/build/
+python/docs/_build/
+
+src/js_embed
+
+# vim generated
+*.swp
+*~
+
+# Generated test scaffolding
+src/no_warning_test.cc
+src/no-warning-test
+src/protobuf*-test
+src/test_plugin
+src/testzip.*
+src/zcg*zip
+ar-lib
+
+test-driver
+compile
+
+src/**/*.log
+src/**/*.trs
+
+# JavaBuild output.
+java/**/target
+java/.idea
+java/**/*.iml
+
+# Windows native output.
+cmake/build
+build_msvc
+# Directories suggested by cmake/README.md
+/debug/
+/solution/
+/release/
+
+# NuGet packages: we want the repository configuration, but not the
+# packages themselves.
+/csharp/src/packages/*/
+
+# OS X's Finder creates these for state about opened windows/etc.
+**/.DS_Store
+
+# Cocoapods artifacts
+# Podfile.lock and the workspace file are tracked, to ease deleting them. That's
+# needed to trigger "pod install" to rerun the preinstall commands.
+Pods/
+
+# Conformance test output
+conformance/.libs/
+conformance/com/
+conformance/conformance-cpp
+conformance/conformance-csharp
+conformance/conformance-java
+conformance/conformance-objc
+conformance/conformance-test-runner
+conformance/conformance.pb.cc
+conformance/conformance.pb.h
+conformance/Conformance.pbobjc.h
+conformance/Conformance.pbobjc.m
+conformance/conformance_pb.js
+conformance/conformance_pb.rb
+conformance/core
+conformance/failing_tests.txt
+conformance/google/
+conformance/google-protobuf/
+conformance/javac_middleman
+conformance/lite/
+conformance/nonexistent_tests.txt
+conformance/protoc_middleman
+conformance/succeeding_tests.txt
+conformance/Conformance/
+conformance/GPBMetadata/
+conformance/Google/
+conformance/Protobuf_test_messages/
+conformance/conformance-php
+conformance/conformance-php-c
+conformance/*.class
+
+# php test output
+composer.lock
+php/.phpunit.result.cache
+php/tests/.phpunit.result.cache
+php/tests/generated/
+php/tests/old_protoc
+php/tests/phpunit-9.phar
+php/tests/protobuf/
+php/tests/core
+php/tests/vgcore*
+php/tests/multirequest.result
+php/tests/nohup.out
+php/tests/.phpunit.result.cache
+php/tests/phpunit-*
+php/ext/google/protobuf/.libs/
+php/ext/google/protobuf/Makefile.fragments
+php/ext/google/protobuf/Makefile.global
+php/ext/google/protobuf/Makefile.objects
+php/ext/google/protobuf/acinclude.m4
+php/ext/google/protobuf/build/
+php/ext/google/protobuf/bundled_php.c
+php/ext/google/protobuf/config.h
+php/ext/google/protobuf/config.h.in~
+php/ext/google/protobuf/config.nice
+php/ext/google/protobuf/configure.ac
+php/ext/google/protobuf/configure.in
+php/ext/google/protobuf/mkinstalldirs
+php/ext/google/protobuf/run-tests.php
+php/ext/google/protobuf/third_party/
+vendor/
+
+# Ignore the bazel symlinks
+/bazel-*
+
+# ruby test output
+ruby/tests/basic_test_pb.rb
+ruby/tests/basic_test_proto2_pb.rb
+ruby/tests/generated_code_pb.rb
+ruby/tests/test_import_pb.rb
+ruby/tests/test_ruby_package_pb.rb
+ruby/tests/generated_code_proto2_pb.rb
+ruby/tests/multi_level_nesting_test_pb.rb
+ruby/tests/service_test_pb.rb
+ruby/tests/test_import_proto2_pb.rb
+ruby/tests/test_ruby_package_proto2_pb.rb
+ruby/compatibility_tests/v3.0.0/protoc
+ruby/compatibility_tests/v3.0.0/tests/generated_code_pb.rb
+ruby/compatibility_tests/v3.0.0/tests/test_import_pb.rb
+ruby/Gemfile.lock
+
+# IntelliJ CLion Config files and build output
+cmake/.idea
+cmake/cmake-build-debug/
+
+# Common build subdirectories.
+.build/
+_build/
+
+# Visual Studio 2017
+.vs
+
+# Visual Studio Code
+/.vscode/
+
+# IntelliJ
+.idea
+*.iml
+
+# Eclipse
+**/.settings
+**/.project
+**/.classpath
+
+# BenchmarkDotNet
+BenchmarkDotNet.Artifacts/
+
+# Clangd uses these common ephemeral files
+.cache
+compile_commands.json
+
+# Ignore GHA NodeJS files
+.github/**/node_modules/
+
+# Ignore Bzlmod lock file until it is more stable
+MODULE.bazel.lock
+
+# Created by https://www.toptal.com/developers/gitignore/api/visualstudiocode
+# Edit at https://www.toptal.com/developers/gitignore?templates=visualstudiocode
+
+### VisualStudioCode ###
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+
+# Local History for Visual Studio Code
+.history/
+
+# Built Visual Studio Code Extensions
+*.vsix
+
+### VisualStudioCode Patch ###
+# Ignore all local history of files
+.history
+.ionide
+
+# End of https://www.toptal.com/developers/gitignore/api/visualstudiocode
+
+*.log
+
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+#   For a library or package, you might want to ignore these files since the code is
+#   intended to run in multiple environments; otherwise, check them in:
+# .python-version
+
+# pipenv
+#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
+#   However, in case of collaboration, if having platform-specific dependencies or dependencies
+#   having no cross-platform support, pipenv may install dependencies that don't work, or not
+#   install all needed dependencies.
+#Pipfile.lock
+
+# poetry
+#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
+#   This is especially recommended for binary packages to ensure reproducibility, and is more
+#   commonly ignored for libraries.
+#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
+#poetry.lock
+
+# pdm
+#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
+#pdm.lock
+#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
+#   in version control.
+#   https://pdm.fming.dev/latest/usage/project/#working-with-version-control
+.pdm.toml
+.pdm-python
+.pdm-build/
+
+# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# PyCharm
+#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
+#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
+#  and can be added to the global gitignore or merged into this file.  For a more nuclear
+#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
+#.idea/
+
+# Logs
+logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dev-debug.log
+# Dependency directories
+node_modules/
+# Environment variables
+# Editor directories and files
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+# OS specific
+.DS_Store
+
+# Task files
+# tasks.json
+# tasks/ 

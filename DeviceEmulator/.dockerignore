@@ -1,0 +1,83 @@
+# Git相关
+.git
+.gitignore
+.gitattributes
+
+# Python相关
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.tox
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.idea
+.vscode
+
+# 构建产物
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# 开发环境
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# 测试
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
+build/
+
+# 文档
+docs/_build/
+
+# macOS
+.DS_Store
+
+# 数据和日志
+data/
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 临时文件
+*build/
+**/build/
+tmp/
+temp/
+*.tmp
+
+# Docker相关
+.dockerignore
+Dockerfile
+docker-compose*.yml
+
+# 大文件和模型
+*.bin
+*.safetensors
+models/
+checkpoints/
+
+# 评估结果
+evaluation/plots/

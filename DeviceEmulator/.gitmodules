@@ -1,0 +1,10 @@
+[submodule "external/protobuf"]
+	path = external/protobuf
+	url = https://github.com/protocolbuffers/protobuf.git
+	branch = 3.13.x
+[submodule "external/rabbitmq-c"]
+	path = external/rabbitmq-c
+	url = https://github.com/alanxz/rabbitmq-c.git
+[submodule "external/redis-plus-plus"]
+	path = external/redis-plus-plus
+	url = https://github.com/sewenew/redis-plus-plus.git

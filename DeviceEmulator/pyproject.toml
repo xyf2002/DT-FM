@@ -1,0 +1,41 @@
+[build-system]
+requires = [
+    "setuptools",
+    "wheel",
+    "cmake>=3.20",
+    "ninja",
+    "protobuf==3.13.0"
+]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 80
+exclude = []
+
+[tool.ruff.lint]
+fixable = ["ALL"]
+unfixable = [
+    # star imports
+    "F405",
+    "F403",
+    # lambda expression assignment
+    "E731",
+    # Loop control variable not used within loop body
+    "B007",
+    # raise distinguish errors
+    "B904",
+    # f-string format
+    "UP032",
+]
+select = [
+    # isort
+    "I",
+]
+ignore = [
+    # Loop control variable not used within loop body
+    "B007"
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+

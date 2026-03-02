@@ -1,0 +1,26 @@
+// FlatBuffers schema for MatrixPartition
+// This is a performance comparison version
+
+namespace morphling.global_api.flatbuffers;
+
+table PayloadData {
+  data: [ubyte];
+}
+
+table MatrixPartitionFB {
+  version: uint64;
+  row: int64;
+  col: int64;
+  pivot: int64;
+  h_dim: int64;
+  dev_id: int64;
+  oid: int64;
+  gemm_id: int64;
+  timestamp: uint64;
+  // First matrix data (row block)
+  matrix_a: PayloadData;
+  // Second matrix data (col block)
+  matrix_b: PayloadData;
+}
+
+root_type MatrixPartitionFB;

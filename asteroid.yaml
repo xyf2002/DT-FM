@@ -1,0 +1,115 @@
+# =============================================================================
+# Asteroid — Unified Configuration
+# =============================================================================
+# Single source of truth for the entire Asteroid distributed-training system.
+# Consumed by: worker.py, run_planner.py, deploy.sh, generate_manifests.py.
+#
+# Sections:
+#   model           — Transformer architecture and task head
+#   training        — Optimization, batching, and loop hyperparameters
+#   parallelism     — Strategy selection, schedule, and communication
+#   fault_tolerance — Unified FT policy (same for all strategies)
+#   cluster         — Physical node inventory (replaces cluster.conf)
+#   mps             — NVIDIA Multi-Process Service (optional GPU sharing)
+#   deploy          — Docker image, K8s, and Ansible settings
+# =============================================================================
+
+# ── Model ────────────────────────────────────────────────────────────────────
+model:
+  model_name: gpt2
+  model_type: gpt2              # gpt2 | llama | encoder
+  task_type: classification     # classification | lm
+  num_layers: 12
+  embedding_dim: 768
+  num_heads: 12
+  n_kv_heads: 0                 # GQA key/value heads (0 = MHA, i.e. n_kv_heads == num_heads)
+  d_ff: 3072
+  max_seq_len: 128
+  vocab_size: 50257
+  num_classes: 2
+  dropout: 0.1
+  use_flash_attention: true
+  hf_model_name: ""             # if non-empty, use HFModelAdapter (e.g. "meta-llama/Llama-2-7b")
+
+# ── Training ─────────────────────────────────────────────────────────────────
+training:
+  global_batch_size: 256
+  micro_batch_size: 4
+  lr: 3.0e-4
+  min_lr: 1.0e-5
+  weight_decay: 0.01
+  max_iters: 500
+  warmup_iters: 50
+  grad_clip: 1.0
+  eval_interval: 100
+  log_interval: 10
+  seed: 42
+  dataset: sst2
+
+# ── Parallelism ──────────────────────────────────────────────────────────────
+parallelism:
+  strategy: asteroid            # asteroid | confident | dtfm
+  schedule_type: ""             # gpipe | 1f1b  (auto-set by strategy if empty)
+  num_stages: 2
+  world_size: 3
+  comm_backend: torch_dist      # torch_dist | nccl | gloo
+  dist_url: "tcp://127.0.0.1:29600"
+  d2d_bandwidth_mbps: 100.0
+
+# ── Fault Tolerance (unified — applied to ALL strategies) ────────────────────
+fault_tolerance:
+  heartbeat_interval_s: 2.0
+  heartbeat_timeout_s: 8.0
+  backward_timeout_ms: 30000.0
+  replication_mode: all         # all | topology | local | global | none
+  replication_interval: 25
+  ft_check_interval: 5
+  checkpoint_strategy: async    # async | sync
+  checkpoint_dir: ./checkpoints
+  checkpoint_interval: 100
+
+# ── Cluster (replaces cluster.conf) ──────────────────────────────────────────
+cluster:
+  nodes:
+    - ip: 10.203.54.10
+      hostname: master
+      nic: ens33
+      gpu_id: 0
+      memory_mb: 4096
+      rank: 0
+      role: master
+
+    - ip: 10.203.53.10
+      hostname: worker1
+      nic: ens33
+      gpu_id: 0
+      memory_mb: 4096
+      rank: 1
+
+    - ip: 10.203.56.10
+      hostname: worker3
+      nic: ens33
+      gpu_id: 0
+      memory_mb: 4096
+      rank: 2
+
+# ── MPS (NVIDIA Multi-Process Service) ──────────────────────────────────────
+mps:
+  enabled: false
+  active_thread_percentage: 50
+  pipe_directory: ""            # default: /tmp/nvidia-mps-<gpu_id>
+  log_directory: ""             # default: /tmp/nvidia-log-<gpu_id>
+  pinned_device_mem_limit: ""
+
+# ── Deploy ───────────────────────────────────────────────────────────────────
+deploy:
+  image_name: asteroid
+  image_tag: latest
+  kubeconfig: ~/.kube/config
+  namespace: default
+  master_port: 29500
+  nccl_debug: WARN
+  nccl_ib_disable: "1"
+  nccl_p2p_disable: "1"
+  shm_size: 4Gi
+  output_dir: ./asteroid_output

@@ -1,0 +1,59 @@
+# DT-FM baseline default configuration
+# Strategy: GCMA topology optimizer + DP layer partitioner + GPipe schedule
+model:
+  model_name: "gpt2"
+  model_type: "gpt2"
+  task_type: "lm"
+  task: "Seq2SeqClassification"
+  seq_length: 128
+  max_seq_len: 128
+  embedding_dim: 768
+  num_layers: 12
+  num_heads: 12
+  d_ff: 3072
+  vocab_size: 50257
+  num_classes: 2
+  dropout: 0.1
+  use_flash_attention: true
+
+device:
+  use_cuda: true
+  cuda_num: 4
+  mps_enabled: false
+  mps_active_thread_percentage: 100
+  # mps_pipe_directory: ""
+  # mps_log_directory: ""
+  # mps_pinned_device_mem_limit: ""
+
+training:
+  batch_size: 16
+  global_batch_size: 16
+  micro_batch_size: 4
+  lr: 3.0e-4
+  min_lr: 1.0e-5
+  warmup_iters: 50
+  max_iters: 200
+  seed: 42
+  weight_decay: 0.01
+  grad_clip: 1.0
+  eval_interval: 100
+  log_interval: 10
+
+distributed:
+  dist_backend: "nccl"
+  dist_url: "tcp://127.0.0.1:29500"
+  world_size: 4
+
+parallelism:
+  strategy: "dtfm"
+  pp_size: 2
+  dp_size: 2
+  schedule_type: "gpipe"
+
+fault_tolerance:
+  checkpoint_dir: "./checkpoints/dtfm"
+  checkpoint_interval: 100
+  checkpoint_strategy: "sync"
+
+communication:
+  backend: "nccl"

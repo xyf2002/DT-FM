@@ -1,0 +1,30 @@
+package morphling.manage
+
+import "morphling.proto";
+
+//==================================================================================================
+enum MessageType {
+    BEGINNING_ID = 300;
+
+    // ----- Device 接口 ----------------------------------------------------------------------------
+    DEVICE_REGISTER_REQUEST = 301;
+    DEVICE_REGISTER_RESPONSE = 302;
+
+    ENDING_ID = 400;
+};
+
+//======================================================================================================================
+extend morphling.Body {
+    // ----- Device 接口 -----------------------------------------------------------------------------------------------
+    optional DeviceRegisterRequest device_register_request = 301; // 计算矩阵乘法
+    optional DeviceRegisterResponse device_register_response = 302;
+};
+
+message DeviceRegisterRequest {
+    required int64 rank = 1;
+}
+
+message DeviceRegisterResponse {
+    required ResponseCode ret = 1;
+    optional int64 rank = 10;
+}

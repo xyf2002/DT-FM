@@ -197,6 +197,8 @@ rich==14.3.3
     # via typer
 safetensors==0.7.0
     # via transformers
+scipy>=1.10.0
+    # via confident (pyproject.toml)
 shellingham==1.5.4
     # via typer
 six==1.17.0

@@ -1,0 +1,40 @@
+package morphling.collective
+
+import "morphling.proto";
+
+//==================================================================================================
+enum MessageType {
+    BEGINNING_ID = 200;
+
+    // ----- Collective Communication 接口 ----------------------------------------------------------------------------
+    ALLREDUCE_REQUEST = 201; // AllReduce collective, compute reduce on PS and send all result back
+    ALLREDUCE_RESPONSE = 202;
+
+    // ----- P2P Communication 接口 ----------------------------------------------------------------------------
+    SEND_REQUEST = 203; // P2P does not need response
+    SEND_RESPONSE = 204; // Send response for debugging purpose
+
+    ENDING_ID = 300;
+};
+
+//======================================================================================================================
+extend morphling.Body {
+    // ----- Collective Communication 接口 -----------------------------------------------------------------------------------------------
+    optional AllReduceRequest allreduce_request = 201;
+    optional AllReduceResponse allreduce_response = 202;
+
+    // ----- P2P Communication 接口 ----------------------------------------------------------------------------
+    optional SendRequest send_request = 203;
+    optional SendResponse send_response = 204;
+};
+
+message SendRequest {
+    required int64 rank = 1;
+    repeated int64 shape = 10;
+    required int32 dtype = 11;
+    required Payload tensor = 20;
+}
+
+// send just confirms that server has received the data
+message SendResponse {
+}

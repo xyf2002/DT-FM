@@ -1,0 +1,37 @@
+# Baselines distributed training — Docker Compose.
+#
+# Usage:
+#   docker compose -f baselines/docker-compose.yaml up --build
+#
+# Override GPU count or strategy:
+#   NUM_GPUS=8 STRATEGY=asteroid docker compose -f baselines/docker-compose.yaml up --build
+
+services:
+  baselines-train:
+    build:
+      context: ..
+      dockerfile: baselines/Dockerfile
+    runtime: nvidia
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NCCL_DEBUG=INFO
+    volumes:
+      - ./output:/workspace/output
+    command: >
+      python -m baselines.train
+        --spawn
+        --num-gpus ${NUM_GPUS:-4}
+        --strategy ${STRATEGY:-dtfm}
+        --config baselines/configs/${STRATEGY:-dtfm}_default.yaml
+        --output-dir /workspace/output

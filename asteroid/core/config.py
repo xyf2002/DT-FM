@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Dict, Optional, Any
 
 @dataclass
@@ -10,6 +11,12 @@ class DeviceSpec:
     memory_budget_mb: float = 4096.0
     cuda_id: int = 0
     compute_capacity: float = 1.0     # relative throughput factor
+    # MPS (Multi-Process Service) fields
+    mps_enabled: bool = False
+    mps_active_thread_percentage: int = 100
+    mps_pipe_directory: str = ""
+    mps_log_directory: str = ""
+    mps_pinned_device_mem_limit: str = ""
 
 
 @dataclass
@@ -36,23 +43,39 @@ class NodeInfo:
     def from_dict(cls, data: Dict[str, Any]) -> "NodeInfo":
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
+
+@dataclass
+class DeviceTopology:
+    """Device-level topology and communication characteristics."""
+    device_specs: List[DeviceSpec] = field(default_factory=list)
+    bandwidths: Dict[Any, float] = field(default_factory=dict)   # (src,dst) -> MB/s
+    latencies: Dict[Any, float] = field(default_factory=dict)    # (src,dst) -> ms
+
+
 @dataclass
 class AsteroidConfig:
-    """Unified configuration for the Asteroid system."""
-    # Model
+    """Unified configuration for the Asteroid system.
+
+    Can be constructed directly, or loaded from ``asteroid.yaml``
+    via the ``from_yaml()`` classmethod.
+    """
+    # ── Model ────────────────────────────────────────────────────────────────
     model_name: str = "gpt2"
-    model_type: str = "gpt2"          # key into MODEL_REGISTRY
+    model_type: str = "gpt2"          # key into MODEL_REGISTRY: gpt2 | llama | encoder
     task_type: str = "classification"  # classification | lm
     num_layers: int = 12
     embedding_dim: int = 768
     num_heads: int = 12
+    n_kv_heads: int = 0               # GQA key/value heads (0 = MHA)
     d_ff: int = 3072
     max_seq_len: int = 128
     vocab_size: int = 50257
     num_classes: int = 2
     dropout: float = 0.1
     use_flash_attention: bool = True
-    # Training
+    hf_model_name: str = ""           # if set, use HFModelAdapter
+
+    # ── Training ─────────────────────────────────────────────────────────────
     global_batch_size: int = 256
     micro_batch_size: int = 4
     num_microbatches: int = 8
@@ -65,26 +88,49 @@ class AsteroidConfig:
     eval_interval: int = 100
     log_interval: int = 10
     seed: int = 42
-    # Parallelism (HPP)
+    dataset: str = "sst2"
+
+    # ── Parallelism ──────────────────────────────────────────────────────────
+    strategy: str = "asteroid"        # asteroid | confident | dtfm
+    schedule_type: str = ""           # gpipe | 1f1b (auto if empty)
     world_size: int = 3
-    num_stages: int = 2       # P in the paper
-    # Communication
+    num_stages: int = 2               # P in the paper
+    comm_backend: str = "torch_dist"  # torch_dist | nccl | gloo
+
+    # ── Communication ────────────────────────────────────────────────────────
     dist_url: str = "tcp://127.0.0.1:29600"
     d2d_bandwidth_mbps: float = 100.0  # default edge bandwidth
-    # Fault Tolerance
-    heartbeat_interval_s: float = 5.0
-    heartbeat_timeout_s: float = 15.0
-    backward_timeout_ms: float = 30000.0  # passive FT backward timeout (ms)
-    replication_mode: str = "topology"  # topology | local | global | none
-    replication_interval: int = 50       # replicate weights every N iters
-    ft_check_interval: int = 10          # check for failures every N iters
-    # I/O
+
+    # ── Fault Tolerance (unified — same for all strategies) ──────────────────
+    heartbeat_interval_s: float = 2.0
+    heartbeat_timeout_s: float = 8.0
+    backward_timeout_ms: float = 30000.0   # passive FT backward timeout (ms)
+    replication_mode: str = "all"          # all | topology | local | global | none
+    replication_interval: int = 25          # replicate weights every N iters
+    ft_check_interval: int = 5             # check for failures every N iters
+    checkpoint_strategy: str = "async"     # async | sync
+    checkpoint_dir: str = "./checkpoints"
+    checkpoint_interval: int = 100
+
+    # ── MPS ──────────────────────────────────────────────────────────────────
+    mps_enabled: bool = False
+    mps_active_thread_percentage: int = 100
+
+    # ── I/O ──────────────────────────────────────────────────────────────────
     output_dir: str = "./asteroid_output"
-    dataset: str = "sst2"
     gpu_ids: List[int] = field(default_factory=lambda: [0, 1, 2, 3])
+
     def __post_init__(self):
         self.num_microbatches = self.global_batch_size // self.micro_batch_size
         os.makedirs(self.output_dir, exist_ok=True)
+
+    # ── Factory ──────────────────────────────────────────────────────────────
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "AsteroidConfig":
+        """Load config from an ``asteroid.yaml`` file."""
+        from asteroid.utils.config_loader import load_config
+        return load_config(path)
 
 @dataclass
 class HPPPlanConfig:

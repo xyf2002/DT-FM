@@ -35,6 +35,7 @@ VENV_DIR="${SCRIPT_DIR}/.venv"
 PROFILES_DIR="${SCRIPT_DIR}/profiles"
 GENERATED_DIR="${DEPLOY_DIR}/generated"
 PLAN_FILE="${SCRIPT_DIR}/hpp_plan.json"
+ASTEROID_CONFIG="${SCRIPT_DIR}/asteroid.yaml"
 
 IMAGE_NAME="asteroid"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
@@ -67,6 +68,7 @@ SKIP_DEPLOY=false
 REDEPLOY_ONLY=false
 RUN_MONITOR=false
 SINGLE_PHASE=""
+STRATEGY=""
 
 # ============================================================================
 # Helpers
@@ -80,6 +82,46 @@ header() {
     echo -e "${CYAN}========================================${NC}"
     echo -e "${CYAN} $*${NC}"
     echo -e "${CYAN}========================================${NC}"
+}
+
+# Read a value from asteroid.yaml using Python
+yaml_get() {
+    local key_path="$1"
+    "${VENV_DIR}/bin/python" -c "
+import yaml, functools, operator
+with open('${ASTEROID_CONFIG}') as f:
+    d = yaml.safe_load(f)
+keys = '${key_path}'.split('.')
+try:
+    val = functools.reduce(operator.getitem, keys, d)
+    print(val if val is not None else '')
+except (KeyError, TypeError):
+    print('')
+"
+}
+
+# Load config values from asteroid.yaml (overrides env vars if YAML exists)
+load_yaml_config() {
+    if [[ ! -f "${ASTEROID_CONFIG}" ]]; then
+        warn "asteroid.yaml not found at ${ASTEROID_CONFIG}, using defaults"
+        return
+    fi
+    info "Loading config from ${ASTEROID_CONFIG}"
+
+    local yaml_image_name
+    yaml_image_name=$(yaml_get "deploy.image_name")
+    [[ -n "$yaml_image_name" ]] && IMAGE_NAME="$yaml_image_name"
+
+    local yaml_image_tag
+    yaml_image_tag=$(yaml_get "deploy.image_tag")
+    [[ -n "$yaml_image_tag" ]] && IMAGE_TAG="$yaml_image_tag"
+
+    IMAGE_FULL="${IMAGE_NAME}:${IMAGE_TAG}"
+
+    # Strategy (can be overridden by --strategy flag)
+    if [[ -z "$STRATEGY" ]]; then
+        STRATEGY=$(yaml_get "parallelism.strategy")
+    fi
 }
 
 check_prereqs() {
@@ -294,10 +336,19 @@ print(f'  Latency:   {p[\"estimated_latency_ms\"]:.1f} ms')
     fi
 
     info "Running HPP planner..."
-    "${VENV_DIR}/bin/python" run_planner.py \
-        --profiles-dir "${PROFILES_DIR}" \
-        --cluster-conf "${SCRIPT_DIR}/cluster.conf" \
+    local planner_args=(
+        --profiles-dir "${PROFILES_DIR}"
         --output "${PLAN_FILE}"
+    )
+    # Prefer asteroid.yaml for cluster info; fall back to cluster.conf
+    if [[ -f "${ASTEROID_CONFIG}" ]]; then
+        planner_args+=(--config "${ASTEROID_CONFIG}")
+    else
+        planner_args+=(--cluster-conf "${SCRIPT_DIR}/cluster.conf")
+    fi
+    [[ -n "$STRATEGY" ]] && planner_args+=(--strategy "$STRATEGY")
+
+    "${VENV_DIR}/bin/python" run_planner.py "${planner_args[@]}"
 
     log "Plan generated: ${PLAN_FILE}"
 }
@@ -446,6 +497,36 @@ phase_monitor() {
     "${SCRIPT_DIR}/monitor.sh"
 }
 
+phase_mps() {
+    header "MPS Setup"
+
+    local mps_enabled
+    mps_enabled=$(yaml_get "mps.enabled")
+    if [[ "$mps_enabled" != "True" && "$mps_enabled" != "true" ]]; then
+        info "MPS is disabled in asteroid.yaml — skipping"
+        return 0
+    fi
+
+    local thread_pct
+    thread_pct=$(yaml_get "mps.active_thread_percentage")
+    [[ -z "$thread_pct" ]] && thread_pct=50
+
+    info "Starting NVIDIA MPS on all nodes (active_thread_percentage=${thread_pct})..."
+
+    run_ansible_adhoc "cluster" -m shell \
+        -a "nvidia-smi -i 0 -c EXCLUSIVE_PROCESS 2>/dev/null; \
+            nvidia-cuda-mps-control -d 2>/dev/null || true; \
+            echo 'set_active_thread_percentage ${thread_pct}' | nvidia-cuda-mps-control 2>/dev/null || true" \
+        --become
+
+    info "Verifying MPS on all nodes..."
+    run_ansible_adhoc "cluster" -m shell \
+        -a "echo 'get_server_list' | nvidia-cuda-mps-control 2>/dev/null && echo 'MPS running' || echo 'MPS not running'" \
+        --become
+
+    log "MPS setup complete (${thread_pct}% active threads)"
+}
+
 phase_tensorboard() {
     header "TensorBoard Dashboard"
 
@@ -522,7 +603,9 @@ Usage: $(basename "$0") [OPTIONS]
 Run the full Asteroid deployment pipeline or individual phases.
 
 Options:
-  --phase PHASE     Run a single phase: k3s, gpu, profile, plan, build, manifests, deploy, monitor, tensorboard
+  --phase PHASE     Run a single phase: k3s, gpu, profile, plan, build, manifests, deploy, monitor, tensorboard, mps
+  --strategy NAME   Override parallelism strategy: asteroid | confident | dtfm
+  --config PATH     Path to asteroid.yaml (default: ./asteroid.yaml)
   --skip-k3s        Skip K3s installation (already installed)
   --skip-gpu        Skip GPU/NVIDIA setup (already configured)
   --skip-profile    Skip profiling (use existing profiles)
@@ -543,6 +626,7 @@ Phases (run in order):
   7. deploy     Apply manifests & start training
   8. monitor    Live training dashboard
   9. tensorboard  Persistent TensorBoard dashboard
+  10. mps        Start NVIDIA MPS on all nodes (opt-in)
 
 Examples:
   ./deploy.sh                           # Full deployment
@@ -610,6 +694,14 @@ while [[ $# -gt 0 ]]; do
             REDEPLOY_ONLY=true
             shift
             ;;
+        --strategy)
+            STRATEGY="$2"
+            shift 2
+            ;;
+        --config)
+            ASTEROID_CONFIG="$2"
+            shift 2
+            ;;
         --monitor)
             RUN_MONITOR=true
             shift
@@ -635,12 +727,15 @@ done
 # ============================================================================
 main() {
     header "Asteroid Deployment Pipeline"
-    echo "  Image:   ${IMAGE_FULL}"
-    echo "  Config:  ${ANSIBLE_INVENTORY}"
-    echo "  Secrets: ${ANSIBLE_SECRETS}"
-    echo ""
 
     check_prereqs
+    load_yaml_config
+
+    echo "  Image:    ${IMAGE_FULL}"
+    echo "  Strategy: ${STRATEGY:-asteroid}"
+    echo "  Config:   ${ASTEROID_CONFIG}"
+    echo "  Secrets:  ${ANSIBLE_SECRETS}"
+    echo ""
 
     # Single phase mode
     if [[ -n "$SINGLE_PHASE" ]]; then
@@ -654,6 +749,7 @@ main() {
             deploy)    phase_deploy ;;
             monitor)   phase_monitor ;;
             tensorboard) phase_tensorboard ;;
+            mps)       phase_mps ;;
             *)
                 err "Unknown phase: ${SINGLE_PHASE}"
                 usage
