@@ -333,6 +333,14 @@ Examples:
         "--synthetic", action="store_true",
         help="Generate synthetic plan without running DP planner"
     )
+    parser.add_argument(
+        "--config", type=str, default=None,
+        help="Path to asteroid.yaml config file (overrides cluster.conf)"
+    )
+    parser.add_argument(
+        "--strategy", type=str, default=None,
+        help="Parallelism strategy (asteroid, uniform, etc.)"
+    )
     
     args = parser.parse_args()
     
@@ -341,9 +349,38 @@ Examples:
     print("=" * 60)
     
     # Load cluster configuration
-    print(f"\nLoading cluster configuration from {args.cluster_conf}")
-    cluster_nodes = parse_cluster_conf(args.cluster_conf)
-    print(f"  Found {len(cluster_nodes)} nodes in cluster.conf")
+    if args.config and os.path.exists(args.config):
+        print(f"\nLoading config from {args.config}")
+        import yaml
+        with open(args.config) as f:
+            yaml_cfg = yaml.safe_load(f)
+        # Extract cluster nodes from asteroid.yaml
+        cluster_section = yaml_cfg.get("cluster", {})
+        nodes_list = cluster_section.get("nodes", [])
+        cluster_nodes = {}
+        for i, node in enumerate(nodes_list):
+            ip = node.get("ip", node) if isinstance(node, dict) else str(node)
+            cluster_nodes[ip] = {"ip": ip, "nic": "eth0", "rank": i, "gpu_id": 0}
+        print(f"  Found {len(cluster_nodes)} nodes from asteroid.yaml")
+        # Override args from yaml config
+        model_cfg = yaml_cfg.get("model", {})
+        parallelism_cfg = yaml_cfg.get("parallelism", {})
+        training_cfg = yaml_cfg.get("training", {})
+        if model_cfg.get("num_layers"):
+            args.num_layers = model_cfg["num_layers"]
+        if parallelism_cfg.get("num_stages"):
+            args.num_stages = parallelism_cfg["num_stages"]
+        if training_cfg.get("micro_batch_size"):
+            args.micro_batch_size = training_cfg["micro_batch_size"]
+        if training_cfg.get("global_batch_size"):
+            args.global_batch_size = training_cfg["global_batch_size"]
+        if parallelism_cfg.get("world_size") and not cluster_nodes:
+            # Use world_size to set fallback
+            pass
+    else:
+        print(f"\nLoading cluster configuration from {args.cluster_conf}")
+        cluster_nodes = parse_cluster_conf(args.cluster_conf)
+        print(f"  Found {len(cluster_nodes)} nodes in cluster.conf")
     
     # Load profiles
     print(f"\nLoading profiles from {args.profiles_dir}")

@@ -171,6 +171,9 @@ spec:
             # TensorBoard logs (persistent on host)
             - name: tensorboard-logs
               mountPath: /tensorboard
+            # Checkpoints (persistent on host)
+            - name: checkpoint-volume
+              mountPath: /app/asteroid_output/checkpoints
           
           # =========================================
           # Startup/Liveness Probes (optional)
@@ -215,6 +218,11 @@ spec:
         - name: tensorboard-logs
           hostPath:
             path: /var/lib/asteroid/tensorboard
+            type: DirectoryOrCreate
+        # Checkpoints - hostPath persists across pod restarts
+        - name: checkpoint-volume
+          hostPath:
+            path: /var/lib/asteroid/checkpoints/rank-{{ rank }}
             type: DirectoryOrCreate
       
       # DNS configuration for headless service resolution

@@ -124,6 +124,101 @@ load_yaml_config() {
     fi
 }
 
+# Generate inventory.ini from asteroid.yaml cluster config
+generate_inventory_from_yaml() {
+    if [[ ! -f "${ASTEROID_CONFIG}" ]]; then
+        warn "asteroid.yaml not found, cannot generate inventory"
+        return 1
+    fi
+
+    if [[ ! -f "${VENV_DIR}/bin/python" ]]; then
+        warn "Python venv not found, cannot generate inventory"
+        return 1
+    fi
+
+    info "Generating ${ANSIBLE_INVENTORY} from ${ASTEROID_CONFIG}"
+
+    "${VENV_DIR}/bin/python" -c "
+import yaml
+import sys
+
+config_path = '${ASTEROID_CONFIG}'
+output_path = '${ANSIBLE_INVENTORY}'
+
+with open(config_path) as f:
+    cfg = yaml.safe_load(f)
+
+nodes = cfg.get('cluster', {}).get('nodes', [])
+if not nodes:
+    print('No cluster.nodes found in asteroid.yaml', file=sys.stderr)
+    sys.exit(1)
+
+master_nodes = [n for n in nodes if n.get('role') == 'master']
+worker_nodes = [n for n in nodes if n.get('role') != 'master']
+
+lines = [
+    '# Asteroid Cluster Inventory',
+    '# ===========================',
+    '# Auto-generated from asteroid.yaml - DO NOT EDIT MANUALLY',
+    '# Re-run ./deploy.sh to regenerate from asteroid.yaml',
+    '',
+    '[master]',
+    '# Master node (Rank 0) - runs the rendezvous service',
+]
+
+for n in master_nodes:
+    hostname = n.get('hostname', f\"node{n.get('rank', 0)}\")
+    ip = n.get('ip', '127.0.0.1')
+    rank = n.get('rank', 0)
+    gpu_id = n.get('gpu_id', 0)
+    nic = n.get('nic', 'eth0')
+    lines.append(
+        f\"{hostname}_node ansible_host={ip} ansible_user='ubuntu' \"
+        f\"rank={rank} gpu_id={gpu_id} nic={nic} hostname={hostname}\"
+    )
+
+lines.extend([
+    '',
+    '[workers]',
+    '# Worker nodes',
+])
+
+for n in worker_nodes:
+    hostname = n.get('hostname', f\"node{n.get('rank', 0)}\")
+    ip = n.get('ip', '127.0.0.1')
+    rank = n.get('rank', 0)
+    gpu_id = n.get('gpu_id', 0)
+    nic = n.get('nic', 'eth0')
+    lines.append(
+        f\"{hostname}_node ansible_host={ip} ansible_user='ubuntu' \"
+        f\"rank={rank} gpu_id={gpu_id} nic={nic} hostname={hostname}\"
+    )
+
+lines.extend([
+    '',
+    '[all:vars]',
+    'ansible_python_interpreter=/usr/bin/python3',
+    '',
+    '[cluster:children]',
+    'master',
+    'workers',
+    '',
+    '[cluster:vars]',
+    'ansible_python_interpreter=/usr/bin/python3',
+    'asteroid_venv=/opt/asteroid/venv',
+    'asteroid_src=/opt/asteroid/src',
+    '',
+])
+
+with open(output_path, 'w') as f:
+    f.write('\\n'.join(lines))
+
+print(f'Generated {output_path} with {len(master_nodes)} master(s) and {len(worker_nodes)} worker(s)')
+"
+
+    log "Inventory generated: ${ANSIBLE_INVENTORY}"
+}
+
 check_prereqs() {
     local ok=true
 
@@ -165,10 +260,9 @@ check_prereqs() {
         ok=false
     fi
 
-    # Inventory
+    # Inventory - will be generated from asteroid.yaml, just warn if missing
     if [[ ! -f "${ANSIBLE_INVENTORY}" ]]; then
-        err "Inventory file not found: ${ANSIBLE_INVENTORY}"
-        ok=false
+        warn "Inventory file not found: ${ANSIBLE_INVENTORY} (will be generated)"
     fi
 
     if [[ "$ok" == false ]]; then
@@ -614,6 +708,10 @@ Options:
   --redeploy        Only regenerate manifests and redeploy jobs
   --monitor         Launch training monitor after deployment
   --status          Show current cluster and training status
+  --status --watch  Continuously refresh status (every 5s, Ctrl-C to stop)
+  --checkpoints [DIR] Collect saved checkpoints from all nodes (default: ./checkpoints_collected)
+  --merge-checkpoints [DIR] [ITER]  Merge rank checkpoints into single model file
+  --stop            Stop all training: delete jobs, pods, services, configmaps, and clean up
   -h, --help        Show this help message
 
 Phases (run in order):
@@ -635,31 +733,324 @@ Examples:
   ./deploy.sh --phase monitor           # Just monitor training
   ./deploy.sh --phase tensorboard       # Launch TensorBoard dashboard
   ./deploy.sh --status                  # Check cluster status
+  ./deploy.sh --checkpoints             # Collect trained model checkpoints
+  ./deploy.sh --merge-checkpoints ./checkpoints_collected 500  # Merge into single model
+  ./deploy.sh --stop                    # Stop training and clean up everything
 EOF
 }
 
-show_status() {
-    header "Cluster Status"
-    echo ""
-    echo "Nodes:"
-    kubectl get nodes -o wide 2>/dev/null || echo "  kubectl not configured"
-    echo ""
-    echo "GPU Resources:"
-    kubectl get nodes -o custom-columns=NAME:.metadata.name,GPU:.status.allocatable."nvidia\.com/gpu" 2>/dev/null || true
-    echo ""
-    echo "Training Pods:"
-    kubectl get pods -l app=asteroid -o wide 2>/dev/null || echo "  No training pods"
-    echo ""
-    echo "Training Jobs:"
-    kubectl get jobs -l app=asteroid 2>/dev/null || echo "  No training jobs"
-    echo ""
+collect_checkpoints() {
+    local dest="${1:-./checkpoints_collected}"
+    mkdir -p "$dest"
 
-    # Show last training log line from last-rank pod
-    local last_pod
-    last_pod=$(kubectl get pods -l app=asteroid --no-headers --sort-by=.metadata.name 2>/dev/null | tail -1 | awk '{print $1}')
-    if [[ -n "$last_pod" ]]; then
-        echo "Latest Training Output (${last_pod}):"
-        kubectl logs "${last_pod}" --tail=5 2>/dev/null | grep -E "iter|loss|epoch" || echo "  (no training output yet)"
+    header "Collecting Checkpoints from Cluster Nodes"
+
+    # Read cluster node IPs from asteroid.yaml into arrays
+    local -a ips hostnames
+    eval "$(python3 -c "
+import yaml
+with open('${ASTEROID_CONFIG:-asteroid.yaml}') as f:
+    cfg = yaml.safe_load(f)
+nodes = cfg.get('cluster',{}).get('nodes',[])
+ips = ' '.join(n['ip'] for n in nodes)
+hostnames = ' '.join(n.get('hostname','unknown') for n in nodes)
+print(f'ips=({ips})')
+print(f'hostnames=({hostnames})')
+" 2>/dev/null)"
+
+    if [[ ${#ips[@]} -eq 0 ]]; then
+        err "No cluster nodes found in config"
+        return 1
+    fi
+
+    local total=0
+    local collected_ranks=""
+    
+    for i in "${!ips[@]}"; do
+        local ip="${ips[$i]}"
+        local hostname="${hostnames[$i]}"
+        
+        log "Scanning ${hostname} (${ip}) for checkpoints..."
+        
+        # Find all rank-* directories on this node (use -n to prevent stdin consumption)
+        local rank_dirs
+        rank_dirs=$(ssh -n -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$ip" \
+            "ls -d /var/lib/asteroid/checkpoints/rank-* 2>/dev/null" 2>/dev/null || true)
+        
+        if [[ -z "$rank_dirs" ]]; then
+            log "  No checkpoint directories found on ${hostname}"
+            continue
+        fi
+        
+        for src in $rank_dirs; do
+            local rank_name=$(basename "$src")
+            local rank_num=${rank_name#rank-}
+            
+            # Skip if we already collected this rank from another node
+            if [[ "$collected_ranks" == *":${rank_num}:"* ]]; then
+                log "  Skipping ${rank_name} (already collected from another node)"
+                continue
+            fi
+            
+            local count
+            count=$(ssh -n -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$ip" \
+                "ls ${src}/*.pt 2>/dev/null | wc -l" 2>/dev/null || echo "0")
+            count=$(echo "$count" | tr -d '[:space:]')
+            
+            if [[ "$count" -gt 0 ]]; then
+                local rank_dir="${dest}/${rank_name}"
+                mkdir -p "$rank_dir"
+                scp -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+                    "${ip}:${src}/*.pt" "$rank_dir/" 2>/dev/null
+                log "  Copied ${count} checkpoint(s) from ${rank_name}"
+                total=$((total + count))
+                collected_ranks="${collected_ranks}:${rank_num}:"
+            else
+                log "  ${rank_name}: empty (no .pt files)"
+            fi
+        done
+    done
+
+    echo ""
+    if [[ "$total" -gt 0 ]]; then
+        log "Collected ${total} checkpoint file(s) to ${dest}/"
+        echo ""
+        echo "Checkpoint files:"
+        find "$dest" -name "*.pt" -printf "  %p (%s bytes)\n" | sort
+    else
+        warn "No checkpoint files found on any node."
+        warn "Training may not have saved checkpoints (check checkpoint_interval in config)."
+    fi
+}
+
+merge_checkpoints() {
+    local checkpoint_dir="${1:-./checkpoints_collected}"
+    local iteration="${2:-}"
+    
+    header "Merging Distributed Checkpoints"
+    
+    if [[ ! -d "$checkpoint_dir" ]]; then
+        err "Checkpoint directory not found: $checkpoint_dir"
+        err "Run './deploy.sh --checkpoints' first to collect checkpoints"
+        return 1
+    fi
+    
+    # Activate venv
+    if [[ -f "${VENV_DIR}/bin/activate" ]]; then
+        source "${VENV_DIR}/bin/activate"
+    fi
+    
+    local cmd="python -m asteroid.ft.merge_checkpoints -d ${checkpoint_dir}"
+    
+    if [[ -n "$iteration" ]]; then
+        cmd="${cmd} -i ${iteration}"
+    fi
+    
+    log "Running: ${cmd}"
+    echo ""
+    
+    eval "$cmd"
+}
+
+stop_and_clean() {
+    header "Deep Stop & Clean — All Nodes"
+
+    # ── 1. Kill all Asteroid K8s resources ──────────────────────────────
+    info "Deleting ALL Asteroid K8s resources (jobs, pods, services, configmaps)..."
+
+    kubectl delete jobs -l app=asteroid --ignore-not-found=true --force --grace-period=0 2>/dev/null || true
+    kubectl delete pods -l app=asteroid --ignore-not-found=true --force --grace-period=0 2>/dev/null || true
+
+    # Also catch any pods that lost their label or are stuck in Terminating
+    local stuck_pods
+    stuck_pods=$(kubectl get pods --no-headers 2>/dev/null | grep -i "asteroid\|rank-" | awk '{print $1}' || true)
+    if [[ -n "$stuck_pods" ]]; then
+        info "Force-deleting stuck pods: ${stuck_pods}"
+        echo "$stuck_pods" | xargs kubectl delete pod --force --grace-period=0 2>/dev/null || true
+    fi
+
+    kubectl delete service asteroid-headless --ignore-not-found=true 2>/dev/null || true
+    kubectl delete configmap asteroid-plan --ignore-not-found=true 2>/dev/null || true
+
+    # Delete ANY remaining resources with asteroid label
+    for kind in deployment statefulset daemonset replicaset cronjob; do
+        kubectl delete "$kind" -l app=asteroid --ignore-not-found=true 2>/dev/null || true
+    done
+    log "K8s resources deleted"
+
+    # ── 2. Wait for pods to fully terminate ─────────────────────────────
+    info "Waiting for all pods to terminate..."
+    local retries=12
+    for i in $(seq 1 $retries); do
+        local remaining
+        remaining=$(kubectl get pods --no-headers 2>/dev/null | grep -ci "asteroid\|rank-" || true)
+        if [[ "$remaining" -eq 0 ]]; then
+            log "All pods terminated"
+            break
+        fi
+        if [[ $i -eq $retries ]]; then
+            warn "${remaining} pod(s) still lingering — they will be cleaned by kubelet"
+        fi
+        sleep 5
+    done
+
+    # ── 3. Kill GPU processes on ALL cluster nodes ──────────────────────
+    info "Killing GPU processes on all cluster nodes via SSH..."
+
+    # Read node IPs from asteroid.yaml
+    local node_ips
+    node_ips=$("${VENV_DIR}/bin/python" -c "
+import yaml
+with open('${ASTEROID_CONFIG}') as f:
+    cfg = yaml.safe_load(f)
+for n in cfg.get('cluster',{}).get('nodes',[]):
+    print(n['ip'])
+" 2>/dev/null)
+
+    if [[ -n "$node_ips" ]]; then
+        while IFS= read -r ip; do
+            info "  Cleaning GPU processes on ${ip}..."
+            ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "ubuntu@${ip}" bash -s 2>/dev/null <<'REMOTE_CLEAN'
+                # Kill any python/pytorch GPU processes (training workers)
+                GPU_PIDS=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | tr -d ' ')
+                if [ -n "$GPU_PIDS" ]; then
+                    echo "  Killing GPU PIDs: $GPU_PIDS"
+                    echo "$GPU_PIDS" | xargs -r kill -9 2>/dev/null || true
+                else
+                    echo "  No GPU processes found"
+                fi
+                # Kill any orphaned asteroid/worker python processes
+                pkill -9 -f "worker.py" 2>/dev/null || true
+                pkill -9 -f "profile_node.py" 2>/dev/null || true
+                pkill -9 -f "run_planner.py" 2>/dev/null || true
+                # Clear NCCL/torch shared memory
+                rm -f /dev/shm/nccl-* /dev/shm/torch_* 2>/dev/null || true
+REMOTE_CLEAN
+            log "  ${ip} cleaned"
+        done <<< "$node_ips"
+    else
+        warn "Could not read node IPs from config — skipping remote GPU cleanup"
+        warn "You can manually run: nvidia-smi and kill GPU processes on each node"
+    fi
+
+    # ── 4. Clean checkpoint data on all nodes ───────────────────────────
+    info "Cleaning checkpoint data on all nodes..."
+    if [[ -n "$node_ips" ]]; then
+        while IFS= read -r ip; do
+            ssh -n -o ConnectTimeout=5 -o StrictHostKeyChecking=no "ubuntu@${ip}" \
+                "sudo rm -rf /var/lib/asteroid/checkpoints/rank-*/*.pt 2>/dev/null; echo 'checkpoints cleared'" \
+                2>/dev/null || true
+        done <<< "$node_ips"
+        log "Remote checkpoints cleared"
+    fi
+
+    # ── 5. Clean local artifacts ────────────────────────────────────────
+    info "Removing local generated files..."
+
+    # Generated K8s manifests
+    if [[ -d "${GENERATED_DIR}" ]]; then
+        rm -f "${GENERATED_DIR}"/00-configmap.yaml
+        rm -f "${GENERATED_DIR}"/01-headless-service.yaml
+        rm -f "${GENERATED_DIR}"/02-job-rank-*.yaml
+        rm -f "${GENERATED_DIR}"/apply.sh
+        log "Generated manifests removed"
+    fi
+
+    # Profiles and plan
+    rm -f "${PROFILES_DIR}"/profile_*.json 2>/dev/null || true
+    rm -f "${PLAN_FILE}" 2>/dev/null || true
+    log "Profiles and HPP plan removed"
+
+    # TensorBoard logs
+    rm -rf /tmp/asteroid_tb_logs 2>/dev/null || true
+    log "TensorBoard logs removed"
+
+    # ── 6. Kill local background processes ──────────────────────────────
+    info "Killing local background processes..."
+    pkill -f "monitor.sh" 2>/dev/null || true
+    pkill -f "tensorboard.*asteroid" 2>/dev/null || true
+    pkill -f "kubectl.*logs.*asteroid" 2>/dev/null || true
+    log "Local processes cleaned"
+
+    # ── 7. Reset GPU memory on all nodes ────────────────────────────────
+    info "Resetting GPU memory on all nodes..."
+    if [[ -n "$node_ips" ]]; then
+        while IFS= read -r ip; do
+            ssh -n -o ConnectTimeout=5 -o StrictHostKeyChecking=no "ubuntu@${ip}" \
+                "python3 -c 'import torch; torch.cuda.empty_cache()' 2>/dev/null || true" \
+                2>/dev/null || true
+        done <<< "$node_ips"
+        log "GPU memory reset"
+    fi
+
+    # ── Summary ─────────────────────────────────────────────────────────
+    echo ""
+    header "Cleanup Complete"
+    echo ""
+    echo "  Destroyed:"
+    echo "    • All K8s jobs, pods, services, configmaps"
+    echo "    • All GPU processes on every cluster node"
+    echo "    • NCCL/torch shared memory on every node"
+    echo "    • Checkpoint files on every node"
+    echo "    • Generated manifests, profiles, HPP plan"
+    echo "    • TensorBoard logs, local background processes"
+    echo ""
+    echo "  Preserved:"
+    echo "    • K3s cluster (nodes still Ready)"
+    echo "    • Docker images (cached on nodes)"
+    echo "    • NVIDIA device plugin (still running)"
+    echo "    • Source code, asteroid.yaml, deploy.sh"
+    echo ""
+    echo "  Next steps:"
+    echo "    ./deploy.sh --status                  # Verify clean state"
+    echo "    ./deploy.sh --skip-k3s --skip-gpu     # Full redeploy"
+    echo "    ./deploy.sh --redeploy                # Quick (skip build/profile/plan)"
+}
+
+show_status() {
+    local watch_mode="${1:-false}"
+    local interval="${STATUS_INTERVAL:-5}"
+
+    _print_status() {
+        if [[ "$watch_mode" == "true" ]]; then
+            clear
+            echo "  Asteroid Status  (every ${interval}s — Ctrl-C to quit)"
+            echo "  $(date '+%Y-%m-%d %H:%M:%S')"
+            echo "──────────────────────────────────────────────────────────"
+        else
+            header "Cluster Status"
+        fi
+        echo ""
+        echo "Nodes:"
+        kubectl get nodes -o wide 2>/dev/null || echo "  kubectl not configured"
+        echo ""
+        echo "GPU Resources:"
+        kubectl get nodes -o custom-columns=NAME:.metadata.name,GPU:.status.allocatable."nvidia\.com/gpu" 2>/dev/null || true
+        echo ""
+        echo "Training Pods:"
+        kubectl get pods -l app=asteroid -o wide 2>/dev/null || echo "  No training pods"
+        echo ""
+        echo "Training Jobs:"
+        kubectl get jobs -l app=asteroid 2>/dev/null || echo "  No training jobs"
+        echo ""
+
+        # Show last training log line from last-rank pod
+        local last_pod
+        last_pod=$(kubectl get pods -l app=asteroid --no-headers --sort-by=.metadata.name 2>/dev/null | tail -1 | awk '{print $1}')
+        if [[ -n "$last_pod" ]]; then
+            echo "Latest Training Output (${last_pod}):"
+            kubectl logs "${last_pod}" --tail=10 2>/dev/null | grep -E "iter|loss|epoch" || echo "  (no training output yet)"
+        fi
+    }
+
+    if [[ "$watch_mode" == "true" ]]; then
+        trap 'echo ""; echo "Status watch stopped."; exit 0' INT
+        while true; do
+            _print_status
+            sleep "$interval"
+        done
+    else
+        _print_status
     fi
 }
 
@@ -707,7 +1098,27 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --status)
-            show_status
+            shift
+            if [[ "${1:-}" == "--watch" || "${1:-}" == "-w" ]]; then
+                show_status true
+            else
+                show_status false
+            fi
+            exit 0
+            ;;
+        --checkpoints)
+            shift
+            collect_checkpoints "${1:-./checkpoints_collected}"
+            exit 0
+            ;;
+        --merge-checkpoints)
+            shift
+            merge_checkpoints "${1:-./checkpoints_collected}" "${2:-}"
+            exit 0
+            ;;
+        --stop)
+            shift
+            stop_and_clean
             exit 0
             ;;
         -h|--help)
@@ -728,8 +1139,14 @@ done
 main() {
     header "Asteroid Deployment Pipeline"
 
-    check_prereqs
+    # Load YAML config first (needs Python venv)
     load_yaml_config
+
+    # Generate inventory.ini from asteroid.yaml cluster config
+    generate_inventory_from_yaml
+
+    # Now check all prerequisites
+    check_prereqs
 
     echo "  Image:    ${IMAGE_FULL}"
     echo "  Strategy: ${STRATEGY:-asteroid}"

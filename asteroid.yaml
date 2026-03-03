@@ -16,25 +16,25 @@
 
 # ── Model ────────────────────────────────────────────────────────────────────
 model:
-  model_name: gpt2
-  model_type: gpt2              # gpt2 | llama | encoder
-  task_type: classification     # classification | lm
-  num_layers: 12
-  embedding_dim: 768
-  num_heads: 12
-  n_kv_heads: 0                 # GQA key/value heads (0 = MHA, i.e. n_kv_heads == num_heads)
-  d_ff: 3072
-  max_seq_len: 128
-  vocab_size: 50257
+  model_name: llama2-7b
+  model_type: llama              # gpt2 | llama | encoder
+  task_type: lm                  # classification | lm
+  num_layers: 32
+  embedding_dim: 4096
+  num_heads: 32
+  n_kv_heads: 32                 # GQA key/value heads (0 = MHA, i.e. n_kv_heads == num_heads)
+  d_ff: 11008
+  max_seq_len: 512
+  vocab_size: 50257              # GPT-2 tokenizer vocab (training from scratch)
   num_classes: 2
-  dropout: 0.1
+  dropout: 0.0
   use_flash_attention: true
   hf_model_name: ""             # if non-empty, use HFModelAdapter (e.g. "meta-llama/Llama-2-7b")
 
 # ── Training ─────────────────────────────────────────────────────────────────
 training:
-  global_batch_size: 256
-  micro_batch_size: 4
+  global_batch_size: 64
+  micro_batch_size: 2
   lr: 3.0e-4
   min_lr: 1.0e-5
   weight_decay: 0.01
@@ -48,10 +48,10 @@ training:
 
 # ── Parallelism ──────────────────────────────────────────────────────────────
 parallelism:
-  strategy: asteroid            # asteroid | confident | dtfm
-  schedule_type: ""             # gpipe | 1f1b  (auto-set by strategy if empty)
-  num_stages: 2
-  world_size: 3
+  strategy: dtfm            # asteroid | confident | dtfm
+  schedule_type: "1f1b"             # gpipe | 1f1b  (auto-set by strategy if empty)
+  num_stages: 4
+  world_size: 4
   comm_backend: torch_dist      # torch_dist | nccl | gloo
   dist_url: "tcp://127.0.0.1:29600"
   d2d_bandwidth_mbps: 100.0
@@ -71,27 +71,34 @@ fault_tolerance:
 # ── Cluster (replaces cluster.conf) ──────────────────────────────────────────
 cluster:
   nodes:
+    - ip: 10.203.54.11
+      hostname: host
+      nic: ens33
+      gpu_id: 0
+      memory_mb: 46068
+      rank: 0
+      role: master
+
     - ip: 10.203.54.10
       hostname: master
       nic: ens33
       gpu_id: 0
-      memory_mb: 4096
-      rank: 0
-      role: master
+      memory_mb: 46068
+      rank: 1
 
     - ip: 10.203.53.10
       hostname: worker1
       nic: ens33
       gpu_id: 0
-      memory_mb: 4096
-      rank: 1
+      memory_mb: 46068
+      rank: 2
 
     - ip: 10.203.56.10
       hostname: worker3
       nic: ens33
       gpu_id: 0
-      memory_mb: 4096
-      rank: 2
+      memory_mb: 46068
+      rank: 3
 
 # ── MPS (NVIDIA Multi-Process Service) ──────────────────────────────────────
 mps:

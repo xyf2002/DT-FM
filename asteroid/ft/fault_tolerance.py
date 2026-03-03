@@ -243,14 +243,30 @@ class AsteroidFaultTolerance:
     # ── Checkpointing ─────────────────────────────────────────────
 
     def save_checkpoint(self, epoch: int, iter_id: int,
-                        model: nn.Module, optimizer: optim.Optimizer):
+                        model: nn.Module, optimizer: optim.Optimizer,
+                        start_layer: int = 0, end_layer: int = 0,
+                        is_first: bool = False, is_last: bool = False,
+                        config: dict = None):
+        """Save checkpoint with stage metadata for later merging."""
         path = self.checkpoint_dir / f"ckpt_e{epoch}_i{iter_id}_r{self.state.global_rank}.pt"
-        torch.save({
-            'epoch': epoch, 'iter_id': iter_id,
+        ckpt = {
+            'epoch': epoch,
+            'iteration': iter_id,
+            'iter_id': iter_id,  # backward compat
             'stage_idx': self.state.stage_idx,
-            'model': model.state_dict(),
-            'optimizer': optimizer.state_dict()
-        }, path)
+            'model_state_dict': model.state_dict(),
+            'model': model.state_dict(),  # backward compat
+            'optimizer_state_dict': optimizer.state_dict(),
+            'optimizer': optimizer.state_dict(),  # backward compat
+            # Stage info for checkpoint merging
+            'start_layer': start_layer,
+            'end_layer': end_layer,
+            'is_first': is_first,
+            'is_last': is_last,
+        }
+        if config:
+            ckpt['config'] = config
+        torch.save(ckpt, path)
         return path
 
     def load_checkpoint(self, path: str) -> Dict:

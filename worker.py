@@ -97,9 +97,10 @@ from asteroid.utils.logger import EVENT_LOGGER, logger
 from asteroid.model.stage import AsteroidStage
 from asteroid.optim.optim_utils import flatten_params, get_lr
 from asteroid.ft.fault_tolerance import AsteroidFaultTolerance
-from asteroid.utils.data_utils import prepare_sst2
+from asteroid.utils.data_utils import prepare_data, prepare_sst2
 from asteroid.planner.profiler import AsteroidProfiler
 from asteroid.planner.dp_planner import AsteroidPlanner
+from asteroid.pipeline.schedule import build_schedule
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -271,11 +272,15 @@ def worker(rank: int, cfg: AsteroidConfig,
     train_embeds, train_labels = train_data
     val_embeds, val_labels = val_data
 
+    is_token_input = (train_embeds.dtype == torch.long)  # LM uses token IDs
+
     def sample_batch_for(embeds, labels, bs, iter_num, micro_idx):
         seed = cfg.seed * 1000003 + dp_rank * 100003 + iter_num * 997 + micro_idx
         g = torch.Generator()
         g.manual_seed(seed)
         ix = torch.randint(len(embeds), (bs,), generator=g)
+        if is_token_input:
+            return embeds[ix].long().to(device), labels[ix].long().to(device)
         return embeds[ix].float().to(device), labels[ix].long().to(device)
 
     num_micro = cfg.num_microbatches
@@ -318,7 +323,72 @@ def worker(rank: int, cfg: AsteroidConfig,
         tb_writer = SummaryWriter(log_dir=tb_log_dir, flush_secs=30)
         print(f"[RANK {rank}] TensorBoard logging to {tb_log_dir}", flush=True)
 
-    print(f"[RANK {rank}] Ready. Starting GPIPE Loop...", flush=True)
+    # ── Resolve pipeline schedule ──────────────────────────────────────
+    schedule_type = cfg.schedule_type or "gpipe"
+    use_1f1b = schedule_type.lower().replace("-", "").replace("_", "") == "1f1b"
+
+    if not is_single:
+        schedule_timeline = build_schedule(schedule_type, pp_size, num_micro)
+        stage_ops = schedule_timeline[pp_rank]
+        print(f"[RANK {rank}] Schedule: {schedule_type} | "
+              f"{len(stage_ops)} ops for stage {pp_rank}", flush=True)
+    else:
+        stage_ops = None
+
+    # ── Per-microbatch pipeline operations (used by GPipe and 1F1B) ──────
+    def do_forward_micro(m):
+        """Execute forward pass for microbatch m on this stage."""
+        if is_first:
+            x, _ = sample_batch_for(train_embeds, train_labels,
+                                    cfg.micro_batch_size, iter_num, m)
+            out = model(x)
+            cached_outputs[m] = out
+            if pp_next_global is not None:
+                torch.distributed.send(out.data.contiguous(),
+                                       dst=pp_next_global)
+        elif is_last:
+            torch.distributed.recv(input_bufs[m], src=pp_prev_global)
+            input_bufs[m].requires_grad_(True)
+            _, y = sample_batch_for(train_embeds, train_labels,
+                                    cfg.micro_batch_size, iter_num, m)
+            loss = model(input_bufs[m], y) * loss_scale
+            micro_losses.append(loss)
+            cached_outputs[m] = loss
+        else:  # Middle stage
+            torch.distributed.recv(input_bufs[m], src=pp_prev_global)
+            input_bufs[m].requires_grad_(True)
+            out = model(input_bufs[m])
+            cached_outputs[m] = out
+            if pp_next_global is not None:
+                torch.distributed.send(out.data.contiguous(),
+                                       dst=pp_next_global)
+
+    def do_backward_micro(m):
+        """Execute backward pass for microbatch m on this stage."""
+        if is_last:
+            out = cached_outputs[m]
+            if out is not None:
+                if out.dim() == 0:
+                    out.backward()
+                else:
+                    out.backward(torch.ones_like(out))
+            if pp_prev_global is not None:
+                torch.distributed.send(input_bufs[m].grad.contiguous(),
+                                       dst=pp_prev_global)
+        elif is_first:
+            if pp_next_global is not None:
+                torch.distributed.recv(grad_bufs[m], src=pp_next_global)
+                cached_outputs[m].backward(gradient=grad_bufs[m])
+        else:  # Middle stage
+            torch.distributed.recv(grad_bufs[m], src=pp_next_global)
+            cached_outputs[m].backward(gradient=grad_bufs[m])
+            if pp_prev_global is not None:
+                torch.distributed.send(input_bufs[m].grad.contiguous(),
+                                       dst=pp_prev_global)
+
+    sched_label = "1F1B" if use_1f1b else "GPipe"
+    print(f"[RANK {rank}] Ready. Starting {sched_label} training loop...",
+          flush=True)
 
     for iter_num in range(cfg.max_iters):
         model.train()
@@ -337,78 +407,50 @@ def worker(rank: int, cfg: AsteroidConfig,
         loss_scale = 1.0 / num_micro
 
         # =====================================================================
-        # EXACT GPIPE LOOP (Adapted strictly from dtfm_gpt2_train copy.py)
-        # ALL Forwards -> Barrier -> ALL Backwards -> Sync
+        # Pipeline Execution (schedule-driven: GPipe or 1F1B)
         # =====================================================================
-
-        # ── GPipe FORWARD ──────────────────────────────────────────
-        # Use torch.distributed.send/recv for reliable pipeline communication
         fwd_start = time.time()
-        for m in range(num_micro):
-            if is_single:
-                x, y = sample_batch_for(train_embeds, train_labels, cfg.micro_batch_size, iter_num, m)
+
+        if is_single:
+            # ── Single stage: no pipeline communication ────────────
+            for m in range(num_micro):
+                x, y = sample_batch_for(train_embeds, train_labels,
+                                        cfg.micro_batch_size, iter_num, m)
                 loss = model(x, y) * loss_scale
                 micro_losses.append(loss)
                 cached_outputs[m] = loss
-
-            elif is_first:
-                x, y = sample_batch_for(train_embeds, train_labels, cfg.micro_batch_size, iter_num, m)
-                out = model(x)
-                cached_outputs[m] = out
-                if pp_next_global is not None:
-                    torch.distributed.send(out.data.contiguous(), dst=pp_next_global)
-
-            elif is_last:
-                torch.distributed.recv(input_bufs[m], src=pp_prev_global)
-                input_bufs[m].requires_grad_(True)  # Enable grad tracking after recv
-                _, y = sample_batch_for(train_embeds, train_labels, cfg.micro_batch_size, iter_num, m)
-                loss = model(input_bufs[m], y) * loss_scale
-                micro_losses.append(loss)
-                cached_outputs[m] = loss
-
-            else:  # Middle stage
-                torch.distributed.recv(input_bufs[m], src=pp_prev_global)
-                input_bufs[m].requires_grad_(True)  # Enable grad tracking after recv
-                out = model(input_bufs[m])
-                cached_outputs[m] = out
-                if pp_next_global is not None:
-                    torch.distributed.send(out.data.contiguous(), dst=pp_next_global)
-
-        # Barrier ensures all forwards are queued safely
-        fwd_end = time.time()
-        barrier_start = time.time()
-        torch.distributed.barrier()
-        barrier_fwd_end = time.time()
-
-        # ── GPipe BACKWARD ─────────────────────────────────────────
-        # Use torch.distributed.send/recv for reliable pipeline communication
-        bwd_start = time.time()
-        for m in reversed(range(num_micro)):
-            if is_single:
+            fwd_end = time.time()
+            barrier_start = barrier_fwd_end = time.time()
+            bwd_start = time.time()
+            for m in reversed(range(num_micro)):
                 cached_outputs[m].backward()
 
-            elif is_last:
-                out = cached_outputs[m]
-                if out is not None:
-                    if out.dim() == 0:
-                        out.backward()
-                    else:
-                        out.backward(torch.ones_like(out))
-                if pp_prev_global is not None:
-                    torch.distributed.send(input_bufs[m].grad.contiguous(), dst=pp_prev_global)
+        elif use_1f1b:
+            # ── 1F1B Interleaved Schedule ──────────────────────────
+            # Warmup forwards → steady-state (F,B) pairs → cooldown
+            # No mid-step barrier — send/recv provides sync.
+            for action, m in stage_ops:
+                if action == "F":
+                    do_forward_micro(m)
+                else:
+                    do_backward_micro(m)
+            fwd_end = bwd_start = time.time()
+            barrier_start = barrier_fwd_end = time.time()
 
-            elif is_first:
-                if pp_next_global is not None:
-                    torch.distributed.recv(grad_bufs[m], src=pp_next_global)
-                    cached_outputs[m].backward(gradient=grad_bufs[m])
+        else:
+            # ── GPipe Schedule ─────────────────────────────────────
+            # ALL Forwards → Barrier → ALL Backwards
+            for m in range(num_micro):
+                do_forward_micro(m)
+            fwd_end = time.time()
+            barrier_start = time.time()
+            torch.distributed.barrier()
+            barrier_fwd_end = time.time()
+            bwd_start = time.time()
+            for m in reversed(range(num_micro)):
+                do_backward_micro(m)
 
-            else:  # Middle stage
-                torch.distributed.recv(grad_bufs[m], src=pp_next_global)
-                cached_outputs[m].backward(gradient=grad_bufs[m])
-                if pp_prev_global is not None:
-                    torch.distributed.send(input_bufs[m].grad.contiguous(), dst=pp_prev_global)
-
-        # Synchronize GPU ONCE at the end of the iteration before optimizer step
+        # Synchronize GPU at end of step before optimizer
         torch.cuda.synchronize()
         bwd_end = time.time()
 
@@ -473,6 +515,23 @@ def worker(rank: int, cfg: AsteroidConfig,
                 tb_writer.add_scalar("train/loss", avg_loss, iter_num)
                 tb_writer.add_scalar("train/learning_rate", lr, iter_num)
                 tb_writer.add_scalar("train/throughput_tok_s", tps, iter_num)
+
+        # ── Periodic Checkpoint ────────────────────────────────────
+        if cfg.checkpoint_interval > 0 and (iter_num + 1) % cfg.checkpoint_interval == 0 and iter_num > 0:
+            ckpt_path = ft.save_checkpoint(
+                epoch=0, iter_id=iter_num + 1, model=model, optimizer=optimizer,
+                start_layer=start_layer, end_layer=end_layer,
+                is_first=(pp_rank == 0), is_last=(pp_rank == pp_size - 1),
+                config=cfg.to_dict() if hasattr(cfg, 'to_dict') else None)
+            print(f"[RANK {rank}] Checkpoint saved: {ckpt_path}", flush=True)
+
+    # ── Final Model Save ───────────────────────────────────────────────────
+    final_ckpt_path = ft.save_checkpoint(
+        epoch=0, iter_id=cfg.max_iters, model=model, optimizer=optimizer,
+        start_layer=start_layer, end_layer=end_layer,
+        is_first=(pp_rank == 0), is_last=(pp_rank == pp_size - 1),
+        config=cfg.to_dict() if hasattr(cfg, 'to_dict') else None)
+    print(f"[RANK {rank}] Final checkpoint saved: {final_ckpt_path}", flush=True)
 
     ft.stop_heartbeat()
     if tb_writer is not None:
@@ -623,7 +682,7 @@ def main_multinode():
     
     # Load data
     print(f"[RANK {rank}] Loading dataset...")
-    train_data, val_data = prepare_sst2(cfg)
+    train_data, val_data = prepare_data(cfg)
     print(f"[RANK {rank}] Data loaded: train={train_data[0].shape}")
     
     # Run worker with env:// init
@@ -671,7 +730,7 @@ def main_local(args):
         plan = AsteroidPlanner(profiler, cfg, devices).plan()
     
     print("Phase 3: Dataset Preparation...")
-    train_data, val_data = prepare_sst2(cfg)
+    train_data, val_data = prepare_data(cfg)
 
     print(f"\nPhase 4: Spawning {cfg.world_size} workers on port {port}...")
     

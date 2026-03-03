@@ -11,9 +11,9 @@ from .llama import LlamaBlock
 
 # Each entry: { "block": BlockClass, "causal": bool }
 MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
-    "gpt2": {"block": GPT2Block, "causal": True},
-    "encoder": {"block": EncoderBlock, "causal": False},
-    "llama": {"block": LlamaBlock, "causal": True},
+    "gpt2": {"block": GPT2Block, "causal": True, "uses_rope": False},
+    "encoder": {"block": EncoderBlock, "causal": False, "uses_rope": False},
+    "llama": {"block": LlamaBlock, "causal": True, "uses_rope": True},
 }
 
 TASK_REGISTRY: Dict[str, type] = {
@@ -21,9 +21,9 @@ TASK_REGISTRY: Dict[str, type] = {
     "lm": LMHead,
 }
 
-def register_model(name: str, block_cls: type, causal: bool = True):
+def register_model(name: str, block_cls: type, causal: bool = True, uses_rope: bool = False):
     """Register a custom transformer block for use with Asteroid."""
-    MODEL_REGISTRY[name] = {"block": block_cls, "causal": causal}
+    MODEL_REGISTRY[name] = {"block": block_cls, "causal": causal, "uses_rope": uses_rope}
 
 def register_task(name: str, head_cls: type):
     """Register a custom task head."""
@@ -72,10 +72,15 @@ class AsteroidStage(nn.Module):
         self.end_layer = end_layer
         self.task_type = cfg.task_type
 
+        # Check if model uses RoPE (no learned positional embeddings)
+        entry = MODEL_REGISTRY.get(cfg.model_type, {})
+        self.uses_rope = entry.get("uses_rope", False)
+
         # ── Embedding ──
         if is_first:
             self.embedding = nn.Embedding(cfg.vocab_size, cfg.embedding_dim)
-            self.pos_embedding = nn.Embedding(cfg.max_seq_len, cfg.embedding_dim)
+            if not self.uses_rope:
+                self.pos_embedding = nn.Embedding(cfg.max_seq_len, cfg.embedding_dim)
             self.drop = nn.Dropout(cfg.dropout)
 
         # ── Transformer blocks (via factory) ──
@@ -106,8 +111,11 @@ class AsteroidStage(nn.Module):
         if self.is_first:
             B, T = x.shape[:2]
             if x.dtype == torch.long:
-                pos = torch.arange(T, device=x.device).unsqueeze(0)
-                x = self.drop(self.embedding(x) + self.pos_embedding(pos))
+                x = self.embedding(x)
+                if not self.uses_rope:
+                    pos = torch.arange(T, device=x.device).unsqueeze(0)
+                    x = x + self.pos_embedding(pos)
+                x = self.drop(x)
         for block in self.blocks:
             x = block(x)
         if self.is_last:
