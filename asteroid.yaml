@@ -49,8 +49,8 @@ training:
 # ── Parallelism ──────────────────────────────────────────────────────────────
 parallelism:
   strategy: dtfm            # asteroid | confident | dtfm
-  schedule_type: "1f1b"             # gpipe | 1f1b  (auto-set by strategy if empty)
-  num_stages: 4
+  schedule_type: ""                 # gpipe | 1f1b  (auto-set by strategy if empty)
+  num_stages: 2                     # pipeline stages per pipeline (pp_size); dp_size = world_size / num_stages
   world_size: 4
   comm_backend: torch_dist      # torch_dist | nccl | gloo
   dist_url: "tcp://127.0.0.1:29600"
@@ -78,6 +78,9 @@ cluster:
       memory_mb: 46068
       rank: 0
       role: master
+      mps:                          # per-node GPU constraint
+        active_thread_percentage: 100   # full compute
+        memory_limit_mb: 40960          # ~40 GB usable
 
     - ip: 10.203.54.10
       hostname: master
@@ -85,6 +88,9 @@ cluster:
       gpu_id: 0
       memory_mb: 46068
       rank: 1
+      mps:
+        active_thread_percentage: 100   # fast — paired with rank 0
+        memory_limit_mb: 40960          # ~40 GB
 
     - ip: 10.203.53.10
       hostname: worker1
@@ -92,6 +98,9 @@ cluster:
       gpu_id: 0
       memory_mb: 46068
       rank: 2
+      mps:
+        active_thread_percentage: 50    # slow — paired with rank 3
+        memory_limit_mb: 24576          # ~24 GB
 
     - ip: 10.203.56.10
       hostname: worker3
@@ -99,13 +108,16 @@ cluster:
       gpu_id: 0
       memory_mb: 46068
       rank: 3
+      mps:
+        active_thread_percentage: 50    # slow — paired with rank 2
+        memory_limit_mb: 24576          # ~24 GB
 
-# ── MPS (NVIDIA Multi-Process Service) ──────────────────────────────────────
+# ── MPS (NVIDIA Multi-Process Service) — global defaults ────────────────────
 mps:
-  enabled: false
-  active_thread_percentage: 50
-  pipe_directory: ""            # default: /tmp/nvidia-mps-<gpu_id>
-  log_directory: ""             # default: /tmp/nvidia-log-<gpu_id>
+  enabled: true
+  active_thread_percentage: 100   # overridden per-node above
+  pipe_directory: ""              # default: /tmp/nvidia-mps-<gpu_id>
+  log_directory: ""               # default: /tmp/nvidia-log-<gpu_id>
   pinned_device_mem_limit: ""
 
 # ── Deploy ───────────────────────────────────────────────────────────────────

@@ -965,6 +965,18 @@ REMOTE_CLEAN
     rm -rf /tmp/asteroid_tb_logs 2>/dev/null || true
     log "TensorBoard logs removed"
 
+    # Temp bundles from profiling/sync
+    rm -f /tmp/asteroid_src.tar.gz 2>/dev/null || true
+    rm -f /tmp/hf_cache.tar.gz 2>/dev/null || true
+    log "Temp bundles removed"
+
+    # Local checkpoint collections are preserved
+    # (my_checkpoints*, final_model, checkpoints_collected)
+
+    # Deploy logs
+    rm -f "${SCRIPT_DIR}"/deploy_full.log 2>/dev/null || true
+    log "Deploy logs removed"
+
     # ── 6. Kill local background processes ──────────────────────────────
     info "Killing local background processes..."
     pkill -f "monitor.sh" 2>/dev/null || true
@@ -991,14 +1003,17 @@ REMOTE_CLEAN
     echo "    • All K8s jobs, pods, services, configmaps"
     echo "    • All GPU processes on every cluster node"
     echo "    • NCCL/torch shared memory on every node"
-    echo "    • Checkpoint files on every node"
+    echo "    • Remote checkpoint files on every node"
     echo "    • Generated manifests, profiles, HPP plan"
     echo "    • TensorBoard logs, local background processes"
+    echo "    • Temp bundles (/tmp/asteroid_src.tar.gz, hf_cache.tar.gz)"
+    echo "    • Deploy logs"
     echo ""
     echo "  Preserved:"
     echo "    • K3s cluster (nodes still Ready)"
     echo "    • Docker images (cached on nodes)"
     echo "    • NVIDIA device plugin (still running)"
+    echo "    • Local checkpoint collections (my_checkpoints*, final_model)"
     echo "    • Source code, asteroid.yaml, deploy.sh"
     echo ""
     echo "  Next steps:"

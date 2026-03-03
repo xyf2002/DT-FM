@@ -33,24 +33,66 @@ class ConfidentStrategy(ParallelismStrategy):
     ) -> ParallelismPlan:
         topology = self._normalize_topology(device_topology)
         num_layers = max(1, config.num_layers)
-        num_stages = max(1, min(self.pp_size, len(topology.device_specs), num_layers))
-        device_groups = {si: [si] for si in range(num_stages)}
+        num_devices = len(topology.device_specs)
 
-        partition_points, est_latency = self._dp_partition(
-            config, topology, num_stages, profiler,
-        )
+        best_plan: ParallelismPlan | None = None
+
+        # Auto-search: try every valid (PP, DP) factorisation and pick
+        # the one with lowest bottleneck latency.
+        for pp in range(1, min(num_devices, num_layers) + 1):
+            if num_devices % pp != 0:
+                continue
+            dp = num_devices // pp
+
+            # Assign devices to stages in order: stage 0 gets first dp
+            # devices, stage 1 gets next dp devices, etc.
+            device_groups: dict[int, list[int]] = {}
+            specs = topology.device_specs
+            for si in range(pp):
+                group_specs = specs[si * dp : (si + 1) * dp]
+                device_groups[si] = [s.device_id for s in group_specs]
+
+            partition_points, est_latency = self._dp_partition(
+                config, topology, device_groups, profiler,
+            )
+            if est_latency == float("inf") or est_latency < 0:
+                continue
+
+            # Model full pipeline schedule: bottleneck × (PP + ceil(M/dp) - 1)
+            # With DP, each pipeline only processes M/dp micro-batches.
+            M = max(1, config.global_batch_size // max(1, config.micro_batch_size))
+            micro_per_pipe = max(1, -(-M // dp))        # ceil(M / dp)
+            schedule_factor = pp + micro_per_pipe - 1
+            effective_latency = est_latency * schedule_factor
+
+            if best_plan is None or effective_latency < best_plan.estimated_latency_ms:
+                best_plan = ParallelismPlan(
+                    partition_points=partition_points,
+                    device_groups=device_groups,
+                    micro_batch_alloc={},
+                    schedule_type=self.get_schedule_type(),
+                    estimated_latency_ms=effective_latency,
+                )
+                logger.debug(
+                    "Confident candidate pp=%d dp=%d step=%.2fms batch=%.2fms (M=%d, M/dp=%d)",
+                    pp, dp, est_latency, effective_latency, M, micro_per_pipe,
+                )
+
+        if best_plan is None:
+            # Fallback: single stage with all devices
+            device_ids = [s.device_id for s in topology.device_specs]
+            best_plan = ParallelismPlan(
+                device_groups={0: device_ids},
+                schedule_type=self.get_schedule_type(),
+            )
+
         logger.info(
-            "Confident plan points=%s latency=%.2fms",
-            partition_points,
-            est_latency,
+            "Confident plan: %d stages, points=%s latency=%.2fms",
+            len(best_plan.device_groups),
+            best_plan.partition_points,
+            best_plan.estimated_latency_ms,
         )
-        return ParallelismPlan(
-            partition_points=partition_points,
-            device_groups=device_groups,
-            micro_batch_alloc={},
-            schedule_type=self.get_schedule_type(),
-            estimated_latency_ms=est_latency,
-        )
+        return best_plan
 
     def get_schedule_type(self) -> str:
         return "1f1b"
@@ -61,22 +103,51 @@ class ConfidentStrategy(ParallelismStrategy):
         self,
         config: AsteroidConfig,
         topology: DeviceTopology,
-        num_stages: int,
+        device_groups: dict[int, list[int]],
         profiler: Any | None,
     ) -> tuple[list[int], float]:
         num_layers = max(1, config.num_layers)
-        if num_stages <= 1:
-            return [], 0.0
+        stage_ids = sorted(device_groups)
+        num_stages = len(stage_ids)
+        spec_by_id = {s.device_id: s for s in topology.device_specs}
 
-        # Build prefix-sum per-stage
+        if num_stages <= 1:
+            # Single stage: bottleneck = slowest device in the group
+            group = device_groups[stage_ids[0]] if stage_ids else []
+            if not group:
+                return [], 0.0
+            worst = float("-inf")
+            for did in group:
+                spec = spec_by_id.get(did, DeviceSpec(device_id=did))
+                total = sum(
+                    self._layer_time(config, spec, did, li, profiler)
+                    for li in range(num_layers)
+                )
+                worst = max(worst, total)
+            return [], worst
+
+        # For each stage use the slowest device in the group (bottleneck)
         stage_prefix: list[list[float]] = []
-        for si in range(num_stages):
-            spec = topology.device_specs[si]
-            cap = max(spec.compute_capacity, 0.1)
+        stage_rep_id: list[int] = []
+        for si_idx in range(num_stages):
+            stage = stage_ids[si_idx]
+            group = device_groups[stage]
+            # Pick slowest device as representative (bottleneck for DP)
+            slowest_id = group[0]
+            slowest_time = float("-inf")
+            for did in group:
+                spec = spec_by_id.get(did, DeviceSpec(device_id=did))
+                t = sum(self._layer_time(config, spec, did, li, profiler)
+                        for li in range(num_layers))
+                if t > slowest_time:
+                    slowest_time = t
+                    slowest_id = did
+            spec = spec_by_id.get(slowest_id, DeviceSpec(device_id=slowest_id))
+            stage_rep_id.append(slowest_id)
             prefix = [0.0]
             for li in range(num_layers):
-                val = self._layer_time(config, spec, si, li, profiler)
-                prefix.append(prefix[-1] + val / cap)
+                val = self._layer_time(config, spec, slowest_id, li, profiler)
+                prefix.append(prefix[-1] + val)
             stage_prefix.append(prefix)
 
         dp = [[float("inf")] * num_stages for _ in range(num_layers)]
@@ -92,7 +163,12 @@ class ConfidentStrategy(ParallelismStrategy):
             for end in range(si, num_layers):
                 for cut in range(si - 1, end):
                     stage_time = range_cost(si, cut + 1, end)
-                    comm = self._comm_time(config, topology, cut, si - 1, si, profiler)
+                    comm = self._comm_time_groups(
+                        config, topology, cut,
+                        device_groups[stage_ids[si - 1]],
+                        device_groups[stage_ids[si]],
+                        profiler,
+                    )
                     candidate = max(dp[cut][si - 1], stage_time + comm)
                     if candidate < dp[end][si]:
                         dp[end][si] = candidate
@@ -121,12 +197,9 @@ class ConfidentStrategy(ParallelismStrategy):
 
     def _normalize_topology(self, topology: DeviceTopology) -> DeviceTopology:
         specs = list(topology.device_specs)
-        target = max(self.pp_size, 1)
         if not specs:
+            target = max(self.pp_size * self.dp_size, 1)
             specs = [DeviceSpec(device_id=i) for i in range(target)]
-        elif len(specs) < target:
-            for idx in range(len(specs), target):
-                specs.append(DeviceSpec(device_id=idx))
         return DeviceTopology(
             device_specs=specs,
             bandwidths=dict(topology.bandwidths),
@@ -178,6 +251,39 @@ class ConfidentStrategy(ParallelismStrategy):
         payload = config.max_seq_len * config.embedding_dim * 4.0
         payload_mb = payload / (1024.0 * 1024.0)
         return lat + payload_mb / max(bw, 1e-6) * 1000.0
+
+    def _comm_time_groups(
+        self,
+        config: AsteroidConfig,
+        topology: DeviceTopology,
+        boundary_layer: int,
+        left_group: list[int],
+        right_group: list[int],
+        profiler: Any | None = None,
+    ) -> float:
+        """Inter-stage comm cost.  Matches reference: output_size / bandwidth."""
+        # Try profiler first (reference behaviour)
+        if profiler is not None:
+            try:
+                out_size = max(profiler.get_output_size(boundary_layer), 1e-6)
+                # Use worst (slowest) bandwidth among sending group devices
+                worst_bw = float("inf")
+                for did in left_group:
+                    worst_bw = min(worst_bw, max(profiler.get_bandwidth(did), 1e-6))
+                return out_size / worst_bw
+            except Exception:
+                pass
+        # Fallback: topology-based
+        payload = config.max_seq_len * config.embedding_dim * 4.0
+        payload_mb = payload / (1024.0 * 1024.0)
+        worst = 0.0
+        for src in left_group:
+            for dst in right_group:
+                bw = self._lookup_link(topology.bandwidths, src, dst, 1000.0)
+                lat = self._lookup_link(topology.latencies, src, dst, 0.1)
+                cost = lat + payload_mb / max(bw, 1e-6) * 1000.0
+                worst = max(worst, cost)
+        return worst
 
     @staticmethod
     def _lookup_link(table: dict, src: int, dst: int, default: float) -> float:

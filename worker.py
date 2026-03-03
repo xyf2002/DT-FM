@@ -174,18 +174,20 @@ def worker(rank: int, cfg: AsteroidConfig,
     state.plan = plan
 
     if not torch.distributed.is_initialized():
+        # Use split backends: gloo for CPU ops (barrier), NCCL for GPU ops (allreduce, send/recv)
+        dist_backend = 'cpu:gloo,cuda:nccl'
         if use_env_init:
             # Multi-node mode: use env:// which reads MASTER_ADDR, MASTER_PORT, RANK, WORLD_SIZE
-            print(f"[RANK {rank}] Initializing distributed (env://)...", flush=True)
+            print(f"[RANK {rank}] Initializing distributed (env://, backend={dist_backend})...", flush=True)
             torch.distributed.init_process_group(
-                backend='nccl',
+                backend=dist_backend,
                 init_method='env://',
                 timeout=timedelta(seconds=300))
         else:
             # Local mode: use explicit URL
-            print(f"[RANK {rank}] Initializing distributed ({cfg.dist_url})...", flush=True)
+            print(f"[RANK {rank}] Initializing distributed ({cfg.dist_url}, backend={dist_backend})...", flush=True)
             torch.distributed.init_process_group(
-                backend='nccl', 
+                backend=dist_backend,
                 init_method=cfg.dist_url,
                 world_size=cfg.world_size, 
                 rank=rank,

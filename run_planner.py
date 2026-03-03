@@ -24,9 +24,10 @@ from typing import Dict, List, Tuple, Optional, Any
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from asteroid.core.config import AsteroidConfig, DeviceSpec, HPPPlanConfig, NodeInfo
+from asteroid.core.config import AsteroidConfig, DeviceSpec, DeviceTopology, HPPPlanConfig, NodeInfo
 from asteroid.planner.profiler import AsteroidProfiler
 from asteroid.planner.dp_planner import AsteroidPlanner
+from asteroid.strategies import create_strategy
 
 
 def parse_cluster_conf(path: str) -> Dict[str, Dict[str, Any]]:
@@ -169,13 +170,21 @@ def build_device_specs_and_profiler(
     for rank, (hostname, profile_data, cluster_info) in matched_data.items():
         hw = profile_data.get("hardware", {})
         
-        # Build DeviceSpec
+        # Build DeviceSpec — apply MPS constraints from asteroid.yaml
+        thread_pct = cluster_info.get("active_thread_pct", 100)
+        mem_limit = cluster_info.get("memory_limit_mb",
+                                     hw.get("gpu_memory_mb", 4096))
+        compute_cap = max(0.01, thread_pct / 100.0)
+        effective_mem = min(hw.get("gpu_memory_mb", 4096), mem_limit)
+
         device_spec = DeviceSpec(
             device_id=rank,
             device_type=hw.get("gpu_name", "unknown"),
-            memory_budget_mb=hw.get("gpu_memory_mb", 4096),
+            memory_budget_mb=effective_mem,
             cuda_id=cluster_info["gpu_id"],
-            compute_capacity=1.0,  # Could derive from profile times
+            compute_capacity=compute_cap,
+            mps_enabled=compute_cap < 1.0,
+            mps_active_thread_percentage=thread_pct,
         )
         device_specs.append(device_spec)
         profiler.devices[rank] = device_spec
@@ -196,6 +205,8 @@ def build_device_specs_and_profiler(
         profile_data_by_rank[rank] = profile_data
         
         # Load execution times into profiler
+        # Scale by 1/compute_capacity since profiles were captured at full GPU
+        scale = 1.0 / compute_cap if compute_cap < 1.0 else 1.0
         profiler.exec_times[rank] = {}
         for layer_idx_str, bs_data in profile_data.get("exec_times", {}).items():
             layer_idx = int(layer_idx_str)
@@ -206,8 +217,8 @@ def build_device_specs_and_profiler(
                 # Skip OOM entries
                 if isinstance(times.get("fwd_ms"), (int, float)):
                     profiler.exec_times[rank][layer_idx][bs] = (
-                        float(times["fwd_ms"]),
-                        float(times["bwd_ms"]),
+                        float(times["fwd_ms"]) * scale,
+                        float(times["bwd_ms"]) * scale,
                     )
     
     # Load bandwidth data
@@ -349,6 +360,10 @@ Examples:
     print("=" * 60)
     
     # Load cluster configuration
+    # Auto-detect asteroid.yaml if --config not explicitly given
+    if args.config is None and os.path.exists("asteroid.yaml"):
+        args.config = "asteroid.yaml"
+    
     if args.config and os.path.exists(args.config):
         print(f"\nLoading config from {args.config}")
         import yaml
@@ -357,10 +372,36 @@ Examples:
         # Extract cluster nodes from asteroid.yaml
         cluster_section = yaml_cfg.get("cluster", {})
         nodes_list = cluster_section.get("nodes", [])
+        mps_global = yaml_cfg.get("mps", {})
         cluster_nodes = {}
         for i, node in enumerate(nodes_list):
-            ip = node.get("ip", node) if isinstance(node, dict) else str(node)
-            cluster_nodes[ip] = {"ip": ip, "nic": "eth0", "rank": i, "gpu_id": 0}
+            if isinstance(node, dict):
+                ip = node.get("ip", f"127.0.0.{i}")
+                # Merge per-node MPS with global defaults
+                node_mps = node.get("mps", {})
+                cluster_nodes[ip] = {
+                    "ip": ip,
+                    "nic": node.get("nic", "eth0"),
+                    "rank": node.get("rank", i),
+                    "gpu_id": node.get("gpu_id", 0),
+                    "hostname": node.get("hostname", f"node-{i}"),
+                    "memory_mb": node.get("memory_mb", 4096),
+                    "active_thread_pct": node_mps.get(
+                        "active_thread_percentage",
+                        mps_global.get("active_thread_percentage", 100),
+                    ),
+                    "memory_limit_mb": node_mps.get(
+                        "memory_limit_mb",
+                        node.get("memory_mb", 4096),
+                    ),
+                }
+            else:
+                ip = str(node)
+                cluster_nodes[ip] = {
+                    "ip": ip, "nic": "eth0", "rank": i, "gpu_id": 0,
+                    "hostname": f"node-{i}", "memory_mb": 4096,
+                    "active_thread_pct": 100, "memory_limit_mb": 4096,
+                }
         print(f"  Found {len(cluster_nodes)} nodes from asteroid.yaml")
         # Override args from yaml config
         model_cfg = yaml_cfg.get("model", {})
@@ -370,6 +411,8 @@ Examples:
             args.num_layers = model_cfg["num_layers"]
         if parallelism_cfg.get("num_stages"):
             args.num_stages = parallelism_cfg["num_stages"]
+        if parallelism_cfg.get("strategy") and args.strategy is None:
+            args.strategy = parallelism_cfg["strategy"]
         if training_cfg.get("micro_batch_size"):
             args.micro_batch_size = training_cfg["micro_batch_size"]
         if training_cfg.get("global_batch_size"):
@@ -430,23 +473,62 @@ Examples:
             matched_data, config
         )
         print(f"  Device specs: {len(device_specs)}")
+        for ds in sorted(device_specs, key=lambda d: d.device_id):
+            print(f"    Rank {ds.device_id}: compute={ds.compute_capacity:.0%}  "
+                  f"mem={ds.memory_budget_mb:.0f}MB  "
+                  f"mps={'ON' if ds.mps_enabled else 'off'}")
         print(f"  Exec times loaded: {sum(len(l) for d in profiler.exec_times.values() for l in d.values())}")
         print(f"  Bandwidth measurements: {len(profiler.bandwidths)}")
         
         # Run planner
-        print(f"\nRunning DP planner (stages={args.num_stages}, layers={args.num_layers})...")
-        
+        strategy_name = (args.strategy or config.strategy or "asteroid").lower().strip()
+        print(f"\nRunning planner (strategy={strategy_name}, stages={args.num_stages}, layers={args.num_layers})...")
+
         try:
-            planner = AsteroidPlanner(
-                profiler=profiler,
-                cfg=config,
-                devices=device_specs,
-            )
-            
-            plan = planner.plan()
-            
-            # Attach node mapping
-            plan.node_mapping = node_mapping
+            if strategy_name in ("dtfm", "confident"):
+                # ── Use strategy classes for DTFM / Confident ──────────
+                # Build DeviceTopology from profiler data
+                topology = DeviceTopology(
+                    device_specs=device_specs,
+                    bandwidths=dict(profiler.bandwidths),
+                    latencies={},
+                )
+
+                # Let the strategy auto-determine optimal PP/DP sizes
+                strategy_kwargs: Dict[str, Any] = {}
+                if strategy_name == "dtfm":
+                    strategy_kwargs["population_size"] = 100
+                    strategy_kwargs["gcma_trails"] = 4900
+
+                strategy = create_strategy(strategy_name, **strategy_kwargs)
+                strat_plan = strategy.create_plan(config, topology, profiler)
+
+                # Convert ParallelismPlan → HPPPlanConfig
+                plan = HPPPlanConfig(
+                    num_stages=len(strat_plan.device_groups),
+                    partition_points=strat_plan.partition_points,
+                    device_groups=strat_plan.device_groups,
+                    micro_batch_alloc=strat_plan.micro_batch_alloc,
+                    estimated_latency_ms=strat_plan.estimated_latency_ms,
+                    node_mapping=node_mapping,
+                )
+                pp_size = len(strat_plan.device_groups)
+                dp_sizes = [len(g) for g in strat_plan.device_groups.values()]
+                dp_size = max(dp_sizes) if dp_sizes else 1
+                print(f"  Schedule type: {strat_plan.schedule_type}")
+                print(f"  Auto PP size: {pp_size}, DP size: {dp_size}")
+            else:
+                # ── Default: AsteroidPlanner DP optimisation ───────────
+                planner = AsteroidPlanner(
+                    profiler=profiler,
+                    cfg=config,
+                    devices=device_specs,
+                )
+
+                plan = planner.plan()
+
+                # Attach node mapping
+                plan.node_mapping = node_mapping
             
         except Exception as e:
             print(f"Warning: DP planner failed ({e}), using fallback plan")

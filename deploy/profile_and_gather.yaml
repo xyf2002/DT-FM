@@ -77,6 +77,16 @@
             --exclude='deploy/generated' \
             --exclude='*.egg-info' \
             --exclude='hpp_plan.json' \
+            --exclude='*.pt' \
+            --exclude='my_checkpoints*' \
+            --exclude='final_model' \
+            --exclude='checkpoints_collected' \
+            --exclude='DeviceEmulator' \
+            --exclude='tb_logs' \
+            --exclude='asteroid_output' \
+            --exclude='*.tar.gz' \
+            --exclude='*.log' \
+            --exclude='README_old.md' \
             -czf "{{ local_bundle_path }}" .
       delegate_to: localhost
       become: false

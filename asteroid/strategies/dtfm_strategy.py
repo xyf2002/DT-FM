@@ -1,14 +1,17 @@
 """DT-FM strategy — GCMA topology search + DP partitioning.
 
-Ported from DeviceEmulator/baselines/strategies/dtfm_strategy.py.
-First runs GCMA evolutionary search to assign devices to pipeline
-stages, then uses DP to partition layers across those stages.
+Ported from scheduler_testing/dtfm_scheduler.py reference implementation.
+First runs GCMA evolutionary search (with bipartite matching + DP-TSP)
+to assign devices to pipeline stages, then uses DP to partition layers.
 """
 from __future__ import annotations
 
 import logging
 import random
 from typing import Any
+
+import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 from asteroid.core.config import AsteroidConfig, DeviceSpec, DeviceTopology
 
@@ -41,218 +44,340 @@ class DTFMStrategy(ParallelismStrategy):
         profiler: Any | None = None,
     ) -> ParallelismPlan:
         topology = self._normalize_topology(device_topology)
-        if len(topology.device_specs) > 1:
-            device_groups = self._run_gcma(topology)
-        else:
-            did = topology.device_specs[0].device_id
-            device_groups = {0: [did]}
+        num_devices = len(topology.device_specs)
+        num_layers = max(1, config.num_layers)
 
-        partition_points, est_latency = self._dp_partition(
-            config, topology, device_groups, profiler,
-        )
+        best_plan: ParallelismPlan | None = None
+        # Auto-search: try every valid (pp, dp) factorisation of
+        # num_devices and pick the one with lowest pipeline latency.
+        for pp in range(1, min(num_devices, num_layers) + 1):
+            if num_devices % pp != 0:
+                continue
+            dp = num_devices // pp
+
+            # Temporarily set for _run_gcma / _assignment_to_groups
+            saved_pp, saved_dp = self.pp_size, self.dp_size
+            self.pp_size, self.dp_size = pp, dp
+            try:
+                if num_devices > 1 and pp > 1:
+                    device_groups = self._run_gcma(topology)
+                else:
+                    device_ids = [s.device_id for s in topology.device_specs]
+                    device_groups = {0: device_ids}
+
+                partition_points, est_latency = self._dp_partition(
+                    config, topology, device_groups, profiler,
+                )
+            finally:
+                self.pp_size, self.dp_size = saved_pp, saved_dp
+
+            if est_latency == float("inf") or est_latency < 0:
+                continue
+
+            # Model full pipeline schedule: bottleneck × (PP + ceil(M/dp) - 1)
+            # With DP, each pipeline only processes M/dp micro-batches,
+            # reducing fill/drain bubble overhead.
+            M = max(1, config.global_batch_size // max(1, config.micro_batch_size))
+            micro_per_pipe = max(1, -(-M // dp))        # ceil(M / dp)
+            schedule_factor = pp + micro_per_pipe - 1
+            effective_latency = est_latency * schedule_factor
+
+            if best_plan is None or effective_latency < best_plan.estimated_latency_ms:
+                best_plan = ParallelismPlan(
+                    partition_points=partition_points,
+                    device_groups=device_groups,
+                    micro_batch_alloc={},
+                    schedule_type=self.get_schedule_type(),
+                    estimated_latency_ms=effective_latency,
+                )
+                logger.debug(
+                    "DTFM candidate pp=%d dp=%d step=%.2fms batch=%.2fms (M=%d, M/dp=%d)",
+                    pp, dp, est_latency, effective_latency, M, micro_per_pipe,
+                )
+
+        if best_plan is None:
+            device_ids = [s.device_id for s in topology.device_specs]
+            best_plan = ParallelismPlan(
+                device_groups={0: device_ids},
+                schedule_type=self.get_schedule_type(),
+            )
+
         logger.info(
-            "DTFM plan points=%s latency=%.2fms",
-            partition_points,
-            est_latency,
+            "DTFM plan: %d stages, points=%s latency=%.2fms",
+            len(best_plan.device_groups),
+            best_plan.partition_points,
+            best_plan.estimated_latency_ms,
         )
-        return ParallelismPlan(
-            partition_points=partition_points,
-            device_groups=device_groups,
-            micro_batch_alloc={},
-            schedule_type=self.get_schedule_type(),
-            estimated_latency_ms=est_latency,
-        )
+        return best_plan
 
     def get_schedule_type(self) -> str:
         return "gpipe"
 
-    # ── GCMA topology search ────────────────────────────────────────────────
+    # ── GCMA topology search (matches reference dtfm_scheduler.py) ─────────
 
     def _run_gcma(self, topology: DeviceTopology) -> dict[int, list[int]]:
+        """Run GCMA evolutionary search with bipartite matching + DP-TSP."""
         specs = topology.device_specs
         device_ids = [s.device_id for s in specs]
         num_devices = len(device_ids)
-        stage_count = max(1, min(self.pp_size, num_devices))
-        if stage_count == 1:
+        pp_size = max(1, min(self.pp_size, num_devices))
+        dp_size = max(1, self.dp_size)
+        if pp_size == 1:
             return {0: device_ids}
 
-        peer_delay, peer_bandwidth, idx_of = self._build_peer_matrices(topology)
-        target_width = max(1, self.dp_size)
-        rng = random.Random(0)
+        # Build peer matrices as numpy arrays (reference format)
+        peer_delay, peer_bw = self._build_np_matrices(topology)
 
-        population: list[list[int]] = []
+        # Approximate gradient/activation sizes for GCMA cost function
+        send_gradient_size_gb = 0.01   # placeholder ~10 MB
+        send_activation_size_gb = 0.01
+
+        # Population init
         pop_n = min(self.population_size, max(num_devices * 2, 4))
-        for seed in range(pop_n):
-            order = device_ids[:]
-            rng.seed(seed)
-            rng.shuffle(order)
+        population: list[list[int]] = []
+        for seed_i in range(pop_n):
+            order = list(range(num_devices))
+            random.seed(seed_i)
+            random.shuffle(order)
             population.append(order)
 
-        best_order = device_ids[:]
-        best_groups = self._assignment_to_groups(best_order, stage_count, target_width)
-        best_score = self._score_grouping(best_groups, peer_delay, peer_bandwidth, idx_of)
+        def to_candidate_partition(order: list[int]) -> list[tuple[int, ...]]:
+            return [tuple(order[i:i + dp_size]) for i in range(0, num_devices, dp_size)]
 
-        scores = [
-            self._score_grouping(
-                self._assignment_to_groups(order, stage_count, target_width),
-                peer_delay, peer_bandwidth, idx_of,
-            )
-            for order in population
-        ]
+        def score(order: list[int]) -> float:
+            cp = to_candidate_partition(order)
+            dp_cost = self._compute_data_parallel_cost(
+                cp, dp_size, peer_delay, peer_bw, send_gradient_size_gb)
+            pp_cost = self._compute_pipeline_parallel_cost_value(
+                cp, pp_size, dp_size, peer_delay, peer_bw, send_activation_size_gb)
+            return dp_cost + 2.0 * pp_cost
 
+        scores = [score(p) for p in population]
+
+        # Evolutionary search
         for _ in range(self.gcma_trails):
-            p1 = rng.randrange(len(population))
-            p2 = rng.randrange(len(population))
+            p1, p2 = random.randrange(pop_n), random.randrange(pop_n)
             if p1 == p2:
                 continue
-            child = self._crossover(population[p1], population[p2], rng)
-            child = self._mutate(child, rng)
-            child_groups = self._assignment_to_groups(child, stage_count, target_width)
-            child_score = self._score_grouping(child_groups, peer_delay, peer_bandwidth, idx_of)
+            child = population[p1].copy()
+            random.shuffle(child)  # simplified crossover from reference
+            child_score = score(child)
+            replaced = p1 if scores[p1] > scores[p2] else p2
+            if child_score < max(scores[p1], scores[p2]):
+                population[replaced] = child
+                scores[replaced] = child_score
 
-            replace = p1 if scores[p1] >= scores[p2] else p2
-            if child_score < scores[replace]:
-                population[replace] = child
-                scores[replace] = child_score
-                if child_score < best_score:
-                    best_score = child_score
-                    best_groups = child_groups
+        # Best partition
+        best_idx = int(np.argmin(scores))
+        best_cp = to_candidate_partition(population[best_idx])
 
-        logger.debug("GCMA best score %.6f", best_score)
-        return best_groups
+        # Get optimal stage ordering via DP-TSP + bipartite matching
+        pp_cost, pp_path, pp_match = self._compute_pipeline_parallel_cost(
+            best_cp, pp_size, dp_size, peer_delay, peer_bw, send_activation_size_gb)
 
-    def _assignment_to_groups(
+        # Build device_groups using pipeline matrix (reference get_pipelines)
+        pipeline = self._get_pipelines(best_cp, pp_path, pp_match, pp_size, dp_size)
+        device_groups: dict[int, list[int]] = {}
+        for stage in range(pp_size):
+            device_groups[stage] = [int(pipeline[stage, p]) for p in range(dp_size)]
+
+        logger.debug("GCMA best score %.6f, path=%s", scores[best_idx], pp_path)
+        return device_groups
+
+    # ── GCMA cost functions (from reference dtfm_scheduler.py) ──────────────
+
+    def _compute_data_parallel_cost(
         self,
-        order: list[int],
-        stage_count: int,
-        target_width: int,
-    ) -> dict[int, list[int]]:
-        groups: dict[int, list[int]] = {s: [] for s in range(stage_count)}
-        cursor = 0
-        for stage in range(stage_count):
-            if cursor < len(order):
-                groups[stage].append(order[cursor])
-                cursor += 1
-        for stage in range(stage_count):
-            while len(groups[stage]) < target_width and cursor < len(order):
-                groups[stage].append(order[cursor])
-                cursor += 1
-        while cursor < len(order):
-            stage = cursor % stage_count
-            groups[stage].append(order[cursor])
-            cursor += 1
-        return groups
-
-    def _score_grouping(
-        self,
-        groups: dict[int, list[int]],
-        peer_delay: list[list[float]],
-        peer_bandwidth: list[list[float]],
-        idx_of: dict[int, int],
+        candidate_partition: list[tuple[int, ...]],
+        dp_size: int,
+        peer_delay: np.ndarray,
+        peer_bw: np.ndarray,
+        send_gradient_size_gb: float,
     ) -> float:
-        stage_ids = sorted(groups)
-        dp_cost = 0.0
-        for stage in stage_ids:
-            group = groups[stage]
-            if len(group) <= 1:
-                continue
-            group_cost = 0.0
-            for src in group:
-                acc = sum(
-                    self._transfer_cost(src, dst, 1.0, peer_delay, peer_bandwidth, idx_of)
-                    for dst in group if src != dst
-                )
-                group_cost = max(group_cost, acc)
-            dp_cost = max(dp_cost, group_cost)
+        """DP cost: max over all partitions of ring-allreduce cost."""
+        data_parallel_cost = float("-inf")
+        for partition in candidate_partition:
+            within_cost = [0.0] * dp_size
+            for i in range(dp_size):
+                for j in range(dp_size):
+                    if i != j:
+                        within_cost[i] += 2 * (
+                            peer_delay[partition[i], partition[j]] / 1e3
+                            + send_gradient_size_gb * 8
+                            / (peer_bw[partition[i], partition[j]] * dp_size)
+                        )
+            if data_parallel_cost < max(within_cost):
+                data_parallel_cost = max(within_cost)
+        return data_parallel_cost
 
-        pp_cost = 0.0
-        for i in range(len(stage_ids) - 1):
-            left = groups[stage_ids[i]]
-            right = groups[stage_ids[i + 1]]
-            pp_cost += self._inter_group_cost(left, right, peer_delay, peer_bandwidth, idx_of)
-        return dp_cost + 2.0 * pp_cost
-
-    def _inter_group_cost(
+    def _bipartite_matching(
         self,
-        left: list[int],
-        right: list[int],
-        peer_delay: list[list[float]],
-        peer_bandwidth: list[list[float]],
-        idx_of: dict[int, int],
-    ) -> float:
-        if not left or not right:
-            return float("inf")
-        used: set[int] = set()
-        max_cost = 0.0
-        for src in left:
-            best_cost = float("inf")
-            best_dst = right[0]
-            for dst in right:
-                if dst in used:
-                    continue
-                cur = self._transfer_cost(src, dst, 1.0, peer_delay, peer_bandwidth, idx_of)
-                if cur < best_cost:
-                    best_cost = cur
-                    best_dst = dst
-            if best_cost == float("inf"):
-                best_cost = min(
-                    self._transfer_cost(src, dst, 1.0, peer_delay, peer_bandwidth, idx_of)
-                    for dst in right
+        part_0: tuple[int, ...],
+        part_1: tuple[int, ...],
+        dp_size: int,
+        peer_delay: np.ndarray,
+        peer_bw: np.ndarray,
+        send_activation_size_gb: float,
+    ) -> tuple[float, list[tuple[int, int]]]:
+        """Hungarian-based bottleneck bipartite matching (reference algorithm)."""
+        cost_mat = np.zeros((dp_size, dp_size))
+        for i in range(dp_size):
+            for j in range(dp_size):
+                cost_mat[i, j] = (
+                    peer_delay[part_0[i], part_1[j]] / 1e3
+                    + send_activation_size_gb * 8 / max(peer_bw[part_0[i], part_1[j]], 1e-6)
                 )
+        descending = np.argsort(cost_mat.flatten())[::-1]
+        inf_weight = 1e6
+        for idx in descending:
+            r, c = int(idx // dp_size), int(idx % dp_size)
+            cur_max = cost_mat[r, c]
+            cost_mat[r, c] = inf_weight
+            row_ind, col_ind = linear_sum_assignment(cost_mat)
+            if cost_mat[row_ind, col_ind].sum() >= inf_weight:
+                return float(cur_max), list(zip(row_ind.tolist(), col_ind.tolist()))
+        return 0.0, []
+
+    def _compute_pipeline_parallel_cost(
+        self,
+        candidate_partition: list[tuple[int, ...]],
+        pp_size: int,
+        dp_size: int,
+        peer_delay: np.ndarray,
+        peer_bw: np.ndarray,
+        send_activation_size_gb: float,
+    ) -> tuple[float, list[int], list[list[Any]]]:
+        """Full PP cost with DP-TSP stage ordering + bipartite matching."""
+        # Cross-cost matrix between all stage pairs
+        cross_cost = np.zeros((pp_size, pp_size))
+        match_matrix: list[list[Any]] = [[None] * pp_size for _ in range(pp_size)]
+
+        for i in range(pp_size):
+            for j in range(i + 1, pp_size):
+                cost, match = self._bipartite_matching(
+                    candidate_partition[i], candidate_partition[j],
+                    dp_size, peer_delay, peer_bw, send_activation_size_gb)
+                cross_cost[i, j] = cost
+                cross_cost[j, i] = cost
+                match_matrix[i][j] = match
+                match_matrix[j][i] = [(c, r) for r, c in match]
+
+        # DP-TSP: find optimal stage ordering
+        best_cost = float("inf")
+        best_path: list[int] = list(range(pp_size))
+
+        for start in range(pp_size):
+            dp_table = np.full((pp_size, 1 << pp_size), np.inf)
+            trace = np.zeros((pp_size, 1 << pp_size), dtype=int)
+
+            def _bitmask(nodes: list[int]) -> int:
+                return sum(1 << n for n in nodes)
+
+            def _solve(node: int, future: list[int]) -> float:
+                if not future:
+                    return 0.0
+                bm = _bitmask(future)
+                if dp_table[node][bm] < np.inf:
+                    return float(dp_table[node][bm])
+                best_d = np.inf
+                best_next = future[0]
+                for nxt in future:
+                    nxt_future = [f for f in future if f != nxt]
+                    d = cross_cost[node][nxt] + _solve(nxt, nxt_future)
+                    if d < best_d:
+                        best_d = d
+                        best_next = nxt
+                dp_table[node][bm] = best_d
+                trace[node][bm] = best_next
+                return float(best_d)
+
+            future = [n for n in range(pp_size) if n != start]
+            cost = _solve(start, future)
+            if cost < best_cost:
+                best_cost = cost
+                path = [start]
+                cur = start
+                remaining = list(future)
+                while remaining:
+                    bm = _bitmask(remaining)
+                    nxt = int(trace[cur][bm])
+                    path.append(nxt)
+                    remaining.remove(nxt)
+                    cur = nxt
+                best_path = path
+
+        return best_cost, best_path, match_matrix
+
+    def _compute_pipeline_parallel_cost_value(
+        self,
+        candidate_partition: list[tuple[int, ...]],
+        pp_size: int,
+        dp_size: int,
+        peer_delay: np.ndarray,
+        peer_bw: np.ndarray,
+        send_activation_size_gb: float,
+    ) -> float:
+        """PP cost value only (without full matching data), for scoring."""
+        cost, _, _ = self._compute_pipeline_parallel_cost(
+            candidate_partition, pp_size, dp_size,
+            peer_delay, peer_bw, send_activation_size_gb)
+        return cost
+
+    def _get_pipelines(
+        self,
+        candidate_partition: list[tuple[int, ...]],
+        path: list[int],
+        match_matrix: list[list[Any]],
+        pp_size: int,
+        dp_size: int,
+    ) -> np.ndarray:
+        """Build pipeline matrix from GCMA result (reference get_pipelines)."""
+        pipeline = np.zeros((pp_size, dp_size), dtype=int)
+        for stage_idx, part_idx in enumerate(path):
+            if stage_idx > 0:
+                last_part_idx = path[stage_idx - 1]
+                bm = match_matrix[last_part_idx][part_idx]
+                if bm:
+                    for match in bm:
+                        for i in range(dp_size):
+                            if pipeline[stage_idx - 1][i] == match[0]:
+                                pipeline[stage_idx][i] = match[1]
             else:
-                used.add(best_dst)
-            max_cost = max(max_cost, best_cost)
-        return max_cost
+                next_part_idx = path[1] if pp_size > 1 else 0
+                bm = match_matrix[part_idx][next_part_idx]
+                if bm:
+                    for i, match in enumerate(bm):
+                        if i < dp_size:
+                            pipeline[0][i] = match[0]
 
-    def _crossover(self, a: list[int], b: list[int], rng: random.Random) -> list[int]:
-        n = len(a)
-        if n <= 1:
-            return a[:]
-        left, right = sorted(rng.sample(range(n), 2))
-        child = [-1] * n
-        child[left:right + 1] = a[left:right + 1]
-        used = set(child[left:right + 1])
-        write = 0
-        for val in b:
-            if val in used:
-                continue
-            while write < n and child[write] != -1:
-                write += 1
-            if write < n:
-                child[write] = val
-        return [v if v != -1 else 0 for v in child]
+        # Map local indices to global device IDs
+        for stage_idx, part_idx in enumerate(path):
+            for i in range(dp_size):
+                pipeline[stage_idx][i] = candidate_partition[part_idx][pipeline[stage_idx][i]]
+        return pipeline
 
-    def _mutate(self, order: list[int], rng: random.Random) -> list[int]:
-        if len(order) > 1 and rng.random() < 0.35:
-            i, j = rng.sample(range(len(order)), 2)
-            order[i], order[j] = order[j], order[i]
-        return order
-
-    def _build_peer_matrices(
+    def _build_np_matrices(
         self,
         topology: DeviceTopology,
-    ) -> tuple[list[list[float]], list[list[float]], dict[int, int]]:
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Build numpy peer_delay and peer_bandwidth matrices."""
         specs = topology.device_specs
-        idx_of = {s.device_id: i for i, s in enumerate(specs)}
-        peer_delay: list[list[float]] = []
-        peer_bw: list[list[float]] = []
+        n = len(specs)
+        peer_delay = np.ones((n, n)) * 1.0   # default 1ms
+        peer_bw = np.ones((n, n)) * 1.0      # default 1 Gbps
+        for i in range(n):
+            peer_delay[i, i] = 0.0
+            peer_bw[i, i] = 100.0
         for i, src in enumerate(specs):
-            d_row: list[float] = []
-            b_row: list[float] = []
             for j, dst in enumerate(specs):
                 if i == j:
-                    d_row.append(0.0)
-                    b_row.append(max(src.compute_capacity, 1.0))
                     continue
                 d = self._lookup_metric(topology.latencies, src.device_id, dst.device_id, 1.0)
-                b = self._lookup_metric(topology.bandwidths, src.device_id, dst.device_id, 1000.0)
-                d_row.append(max(d, 1e-6))
-                b_row.append(max(b, 1e-6))
-            peer_delay.append(d_row)
-            peer_bw.append(b_row)
-        if not specs:
-            return [[0.0]], [[1.0]], {0: 0}
-        return peer_delay, peer_bw, idx_of
+                b = self._lookup_metric(topology.bandwidths, src.device_id, dst.device_id, 1.0)
+                peer_delay[i, j] = max(d, 1e-6)
+                # Convert from MB/s to Gbps for reference compatibility
+                peer_bw[i, j] = max(b * 8.0 / 1000.0, 1e-6)
+        return peer_delay, peer_bw
 
     @staticmethod
     def _lookup_metric(table: dict, src: int, dst: int, default: float) -> float:
@@ -263,21 +388,6 @@ class DTFMStrategy(ParallelismStrategy):
         if reverse is not None:
             return float(reverse)
         return default
-
-    def _transfer_cost(
-        self,
-        src: int,
-        dst: int,
-        payload_gb: float,
-        peer_delay: list[list[float]],
-        peer_bandwidth: list[list[float]],
-        idx_of: dict[int, int],
-    ) -> float:
-        si = idx_of[src]
-        di = idx_of[dst]
-        delay_ms = peer_delay[si][di]
-        bw_gbps = max(peer_bandwidth[si][di], 1e-6)
-        return delay_ms / 1e3 + payload_gb * 8.0 / bw_gbps
 
     # ── DP partition (after GCMA assigns devices to stages) ─────────────────
 
@@ -292,19 +402,40 @@ class DTFMStrategy(ParallelismStrategy):
         stage_ids = sorted(device_groups)
         num_stages = min(len(stage_ids), num_layers)
         if num_stages <= 1:
+            # Single stage: bottleneck = slowest device in the group
+            if device_groups and stage_ids:
+                spec_by_id = {s.device_id: s for s in topology.device_specs}
+                worst = float("-inf")
+                for did in device_groups[stage_ids[0]]:
+                    spec = spec_by_id.get(did, DeviceSpec(device_id=did))
+                    total = sum(
+                        self._layer_time(li, did, spec, config, profiler)
+                        for li in range(num_layers)
+                    )
+                    worst = max(worst, total)
+                return [], worst
             return [], 0.0
 
         spec_by_id = {s.device_id: s for s in topology.device_specs}
         stage_prefix: list[list[float]] = []
         for si in range(num_stages):
             stage = stage_ids[si]
-            rep_id = device_groups[stage][0]
+            # Use slowest device in group as bottleneck representative
+            group = device_groups[stage]
+            rep_id = group[0]
+            rep_time = float("-inf")
+            for did in group:
+                spec = spec_by_id.get(did, DeviceSpec(device_id=did))
+                t = sum(self._layer_time(li, did, spec, config, profiler)
+                        for li in range(num_layers))
+                if t > rep_time:
+                    rep_time = t
+                    rep_id = did
             spec = spec_by_id.get(rep_id, DeviceSpec(device_id=rep_id))
-            cap = max(spec.compute_capacity, 1e-6)
             prefix = [0.0]
             for li in range(num_layers):
                 lt = self._layer_time(li, rep_id, spec, config, profiler)
-                prefix.append(prefix[-1] + lt / cap)
+                prefix.append(prefix[-1] + lt)
             stage_prefix.append(prefix)
 
         dp = [[float("inf")] * num_stages for _ in range(num_layers)]
